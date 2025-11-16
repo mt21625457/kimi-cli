@@ -179,7 +179,6 @@ class ShellApp:
             user_input=payload,
             thinking=user_input.thinking,
         )
-        console.print(f"[cyan]任务 {task.id} 已加入队列[/cyan]")
 
     def _require_task_manager(self) -> ShellTaskManager | None:
         if self._task_manager is None:

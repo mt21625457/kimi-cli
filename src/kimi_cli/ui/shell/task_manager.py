@@ -183,12 +183,19 @@ class TaskStateStore:
     def approvals(self) -> list[ApprovalEntry]:
         return list(self._approvals.values())
 
-    def append_log(self, task_id: int, message: str, *, style: str | None = None) -> None:
+    def append_log(
+        self,
+        task_id: int,
+        message: str,
+        *,
+        style: str | None = None,
+        plain: bool = False,
+    ) -> None:
         if task := self.get(task_id):
             task.logs.append(message)
             if len(task.logs) > 20:
                 task.logs.pop(0)
-        self._log(task_id, message, style=style)
+        self._log(task_id, message, style=style, plain=plain)
 
     def build_table(self) -> Table:
         table = Table(title="Shell Tasks", show_lines=False, box=None)
@@ -208,10 +215,11 @@ class TaskStateStore:
             table.add_row("-", "-", "暂无任务", "-")
         return table
 
-    def _log(self, task_id: int, message: str, *, style: str | None = None) -> None:
-        prefix = Text(f"[任务 {task_id}] ", style="cyan")
-        body = Text(message, style=style or "grey70")
-        console.print(prefix + body)
+    def _log(self, task_id: int, message: str, *, style: str | None = None, plain: bool = False) -> None:
+        _ = task_id  # 仅用于兼容旧调用，输出中不再展示任务编号
+        applied_style = style if style or plain else "grey70"
+        body = Text(message, style=applied_style)
+        console.print(body)
 
 
 class ShellTaskManager:
@@ -324,16 +332,26 @@ class _TaskObserver:
         self._store = store
         self._task_id = task_id
         self._tool_names: dict[str, str] = {}
+        self._text_buffer: list[str] = []
 
     async def observe(self, wire: WireUISide) -> None:
         while True:
             try:
                 msg = await wire.receive()
             except asyncio.QueueShutDown:
+                self._flush_pending_text()
                 return
             self._handle_message(msg)
 
     def _handle_message(self, msg: WireMessage) -> None:
+        if isinstance(msg, TextPart):
+            snippet = self._content_snippet(msg)
+            if snippet:
+                self._text_buffer.append(snippet)
+            return
+
+        self._flush_pending_text()
+
         match msg:
             case StepBegin():
                 self._store.append_log(self._task_id, f"Step {msg.n} 开始")
@@ -349,6 +367,10 @@ class _TaskObserver:
                     f"上下文占用 {status.context_usage:.1%}",
                     style="grey50",
                 )
+            case ThinkPart() as part:
+                snippet = self._content_snippet(part)
+                if snippet:
+                    self._store.append_log(self._task_id, snippet, style="grey50")
             case ContentPart() as part:
                 snippet = self._content_snippet(part)
                 if snippet:
@@ -387,10 +409,10 @@ class _TaskObserver:
     @staticmethod
     def _content_snippet(part: ContentPart) -> str | None:
         if isinstance(part, TextPart):
-            text = part.text.strip()
-            if not text:
+            text = part.text
+            if not text or not text.strip():
                 return None
-            return text if len(text) <= 120 else text[:117] + "…"
+            return text
         if isinstance(part, ThinkPart):
             text = part.text.strip()
             if not text:
@@ -399,3 +421,10 @@ class _TaskObserver:
             body = text if len(text) <= 100 else text[:97] + "…"
             return f"[{prefix}] {body}"
         return None
+
+    def _flush_pending_text(self) -> None:
+        if not self._text_buffer:
+            return
+        text = "".join(self._text_buffer)
+        self._text_buffer.clear()
+        self._store.append_log(self._task_id, text, plain=True)
