@@ -3,6 +3,7 @@ from __future__ import annotations
 from inline_snapshot import snapshot
 
 from kimi_cli.config import (
+    CLIOutputConfig,
     Config,
     Services,
     get_default_config,
@@ -17,6 +18,7 @@ def test_default_config():
             models={},
             providers={},
             services=Services(),
+            cli_output=CLIOutputConfig(),
         )
     )
 
@@ -33,7 +35,14 @@ def test_default_config_dump():
     "max_steps_per_run": 100,
     "max_retries_per_step": 3
   },
-  "services": {}
+  "services": {},
+  "cli_output": {
+    "scan_tool_patterns": [
+      "scan",
+      "rg --files",
+      "openspec validate"
+    ]
+  }
 }\
 """
     )

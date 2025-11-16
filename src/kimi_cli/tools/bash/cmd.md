@@ -3,7 +3,18 @@ Execute a Windows Command Prompt (`cmd.exe`) command. Use this tool to explore t
 Note that you are running on Windows, so make sure to use Windows commands, paths, and conventions.
 
 **Output:**
-The stdout and stderr streams are combined and returned as a single string. Extremely long output may be truncated. When a command fails, the exit code is provided in a system tag.
+Every invocation is summarized as a transcript block:
+
+```
+• Ran <command> [(scan)]
+  │ preview line
+  │ … +N lines
+  └ (exit 0, no output)
+```
+
+Stdout and stderr are merged, previewed with `│`-prefixed lines, and the footer reports the exit
+status as well as whether the output was truncated or missing. Commands whose prefixes appear in
+`cli_output.scan_tool_patterns` inside `~/.kimi/config.json` are annotated with `(scan)`.
 
 **Guidelines for safety and security:**
 - Every tool call starts a fresh `cmd.exe` session. Environment variables, `cd` changes, and command history do not persist between calls.

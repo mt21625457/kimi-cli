@@ -132,6 +132,7 @@ def test_pyinstaller_hiddenimports():
         [
             "kimi_cli.tools",
             "kimi_cli.tools.bash",
+            "kimi_cli.tools.bash.transcript",
             "kimi_cli.tools.dmail",
             "kimi_cli.tools.file",
             "kimi_cli.tools.file.glob",

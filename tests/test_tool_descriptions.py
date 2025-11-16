@@ -116,7 +116,18 @@ def test_bash_description(bash_tool: Bash):
 Execute a shell command. Use this tool to explore the filesystem, edit files, run scripts, get system information, etc.
 
 **Output:**
-The stdout and stderr will be combined and returned as a string. The output may be truncated if it is too long. If the command failed, the exit code will be provided in a system tag.
+Each invocation is summarized as a compact transcript:
+
+```
+• Ran <command> [(scan)]
+  │ first preview line
+  │ … +N lines
+  └ (exit 0, output truncated)
+```
+
+The stdout and stderr streams are merged, previewed line-by-line, and the footer reports the exit
+status plus whether the output was truncated or missing. Commands whose prefixes match
+`cli_output.scan_tool_patterns` in `~/.kimi/config.json` are annotated with `(scan)`.
 
 **Guidelines for safety and security:**
 - Each shell tool call will be executed in a fresh shell environment. The shell variables, current working directory changes, and the shell history is not preserved between calls.

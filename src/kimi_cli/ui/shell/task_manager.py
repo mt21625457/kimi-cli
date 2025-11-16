@@ -107,7 +107,7 @@ class TaskStateStore:
         )
         self._next_id += 1
         self._tasks[task.id] = task
-        self._log(task.id, f"Queued `{command_text}`")
+        self._log(task.id, f"Queued `{command_text}`", silent=True)
         return task
 
     def tasks(self) -> list[ShellTask]:
@@ -120,7 +120,7 @@ class TaskStateStore:
         if task := self.get(task_id):
             task.status = TaskStatus.RUNNING
             task.started_at = datetime.now()
-            self._log(task_id, "Started")
+            self._log(task_id, "Started", silent=True)
 
     def mark_waiting_approval(self, task_id: int, request: ApprovalRequest) -> None:
         task = self.get(task_id)
@@ -217,12 +217,13 @@ class TaskStateStore:
         *,
         style: str | None = None,
         plain: bool = False,
+        silent: bool = False,
     ) -> None:
         if task := self.get(task_id):
             task.logs.append(message)
             if len(task.logs) > 20:
                 task.logs.pop(0)
-        self._log(task_id, message, style=style, plain=plain)
+        self._log(task_id, message, style=style, plain=plain, silent=silent)
 
     def build_table(self) -> Table:
         table = Table(title="Shell Tasks", show_lines=False, box=None)
@@ -243,9 +244,17 @@ class TaskStateStore:
         return table
 
     def _log(
-        self, task_id: int, message: str, *, style: str | None = None, plain: bool = False
+        self,
+        task_id: int,
+        message: str,
+        *,
+        style: str | None = None,
+        plain: bool = False,
+        silent: bool = False,
     ) -> None:
         _ = task_id  # 仅用于兼容旧调用，输出中不再展示任务编号
+        if silent:
+            return
         applied_style = style if style or plain else "grey70"
         body = Text(message, style=applied_style or "")
         console.print(body)
@@ -366,6 +375,8 @@ class ShellTaskManager:
 class _TaskObserver:
     """Consume wire events and log them to the task store."""
 
+    MAX_BASH_TRANSCRIPT_LINES = 6
+
     def __init__(self, store: TaskStateStore, task_id: int):
         self._store = store
         self._task_id = task_id
@@ -392,7 +403,7 @@ class _TaskObserver:
 
         match msg:
             case StepBegin():
-                self._store.append_log(self._task_id, f"Step {msg.n} 开始")
+                self._store.append_log(self._task_id, f"Step {msg.n} 开始", silent=True)
             case StepInterrupted():
                 self._store.append_log(self._task_id, "Step 中断", style="yellow")
             case CompactionBegin():
@@ -433,6 +444,8 @@ class _TaskObserver:
                     message,
                     style="green" if ok else "red",
                 )
+                if name == "Bash" and isinstance(result.result.output, str):
+                    self._log_bash_transcript(result.result.output)
             case ApprovalRequest():
                 self._store.mark_waiting_approval(self._task_id, msg)
             case SubagentEvent():
@@ -463,3 +476,21 @@ class _TaskObserver:
         text = "".join(self._text_buffer)
         self._text_buffer.clear()
         self._store.append_log(self._task_id, text, plain=True)
+
+    def _log_bash_transcript(self, transcript: str) -> None:
+        transcript = transcript.strip()
+        if not transcript:
+            return
+        lines = transcript.splitlines()
+        max_lines = self.MAX_BASH_TRANSCRIPT_LINES
+        shown = lines[:max_lines]
+        remainder = len(lines) - len(shown)
+        for line in shown:
+            self._store.append_log(self._task_id, line, plain=True)
+        if remainder > 0:
+            self._store.append_log(
+                self._task_id,
+                f"… +{remainder} lines",
+                style="grey50",
+                plain=True,
+            )

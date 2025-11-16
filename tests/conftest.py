@@ -169,10 +169,10 @@ def set_todo_list_tool() -> SetTodoList:
 
 
 @pytest.fixture
-def bash_tool(approval: Approval) -> Generator[Bash]:
+def bash_tool(approval: Approval, config: Config) -> Generator[Bash]:
     """Create a Bash tool instance."""
     with tool_call_context("Bash"):
-        yield Bash(approval)
+        yield Bash(approval, config)
 
 
 @pytest.fixture

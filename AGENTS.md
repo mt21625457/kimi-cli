@@ -171,7 +171,7 @@ Selected ruff rules:
 
 ### Available Tools
 
-- **Bash**: Execute shell commands
+- **Bash**: Execute shell commands. Outputs are rendered as `• Ran <cmd>` transcripts with `│`-prefixed previews and `└` footers; scan command tags are driven by `cli_output.scan_tool_patterns` in `~/.kimi/config.json`.
 - **ReadFile**: Read file contents with line limits
 - **WriteFile**: Write content to files
 - **Glob**: File pattern matching

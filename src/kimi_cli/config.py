@@ -73,6 +73,23 @@ class Services(BaseModel):
     """Moonshot Search configuration."""
 
 
+def _default_scan_tool_patterns() -> list[str]:
+    return [
+        "scan",
+        "rg --files",
+        "openspec validate",
+    ]
+
+
+class CLIOutputConfig(BaseModel):
+    """Preferences for CLI-printed command transcripts."""
+
+    scan_tool_patterns: list[str] = Field(
+        default_factory=_default_scan_tool_patterns,
+        description="Command prefixes that should be annotated as scan tools.",
+    )
+
+
 class Config(BaseModel):
     """Main configuration structure."""
 
@@ -83,6 +100,9 @@ class Config(BaseModel):
     )
     loop_control: LoopControl = Field(default_factory=LoopControl, description="Agent loop control")
     services: Services = Field(default_factory=Services, description="Services configuration")
+    cli_output: CLIOutputConfig = Field(
+        default_factory=CLIOutputConfig, description="CLI output preferences"
+    )
 
     @model_validator(mode="after")
     def validate_model(self) -> Self:

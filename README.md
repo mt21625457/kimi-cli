@@ -65,6 +65,30 @@ Kimi CLI is not only a coding agent, but also a shell. You can switch the mode b
 
 Agent commands now run through a background queue: the prompt becomes available immediately so you can keep typing. Use `/tasks` to inspect progress, `/cancel <id>` to stop a job, and `/approvals` + `/approve`/`/reject` to respond to tool approval requests.
 
+### Structured command transcripts
+
+Every Bash tool invocation emits a short, auditable transcript:
+
+```
+• Ran git status
+  │ On branch dev
+  │ … +12 lines
+  └ (exit 0, output truncated)
+```
+
+Lines beginning with `│` contain the merged stdout/stderr preview (capped at 20 lines). The footer
+reports the exit status plus whether output was truncated or missing. If the command prefix matches
+`cli_output.scan_tool_patterns` in `~/.kimi/config.json`, the header gains a `(scan)` tag so
+security-focused operations are easy to spot. Customize the patterns with, e.g.:
+
+```json
+{
+  "cli_output": {
+    "scan_tool_patterns": ["scan", "openspec validate", "yarn audit"]
+  }
+}
+```
+
 ### Zsh integration
 
 You can use Kimi CLI together with Zsh, to empower your shell experience with AI agent capabilities.
