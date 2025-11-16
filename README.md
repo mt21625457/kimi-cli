@@ -63,6 +63,8 @@ Kimi CLI is not only a coding agent, but also a shell. You can switch the mode b
 > [!NOTE]
 > Built-in shell commands like `cd` are not supported yet.
 
+Agent commands now run through a background queue: the prompt becomes available immediately so you can keep typing. Use `/tasks` to inspect progress, `/cancel <id>` to stop a job, and `/approvals` + `/approve`/`/reject` to respond to tool approval requests.
+
 ### Zsh integration
 
 You can use Kimi CLI together with Zsh, to empower your shell experience with AI agent capabilities.

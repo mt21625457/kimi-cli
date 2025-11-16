@@ -18,6 +18,7 @@ from kimi_cli.soul.runtime import load_agents_md
 from kimi_cli.ui.shell.console import console
 from kimi_cli.utils.changelog import CHANGELOG, format_release_notes
 from kimi_cli.utils.logging import logger
+from kimi_cli.wire.message import ApprovalResponse
 
 if TYPE_CHECKING:
     from kimi_cli.ui.shell import ShellApp
@@ -197,6 +198,54 @@ def feedback(app: ShellApp, args: list[str]):
     if webbrowser.open(ISSUE_URL):
         return
     console.print(f"Please submit feedback at [underline]{ISSUE_URL}[/underline].")
+
+
+@meta_command
+def tasks(app: ShellApp, args: list[str]):
+    """列出后台任务状态"""
+    app.show_tasks()
+
+
+@meta_command
+def approvals(app: ShellApp, args: list[str]):
+    """列出待处理审批请求"""
+    app.show_approvals()
+
+
+@meta_command
+def cancel(app: ShellApp, args: list[str]):
+    """取消指定任务"""
+    if not args:
+        console.print("用法: /cancel <task-id>")
+        return
+    app.cancel_task(args[0])
+
+
+@meta_command(name="approve")
+def approve_command(app: ShellApp, args: list[str]):
+    """批准审批请求"""
+    if not args:
+        console.print("用法: /approve <approval-id>")
+        return
+    app.respond_approval(args[0], ApprovalResponse.APPROVE)
+
+
+@meta_command(name="approve-session")
+def approve_session_command(app: ShellApp, args: list[str]):
+    """批准并在本会话内记住选择"""
+    if not args:
+        console.print("用法: /approve-session <approval-id>")
+        return
+    app.respond_approval(args[0], ApprovalResponse.APPROVE_FOR_SESSION)
+
+
+@meta_command(name="reject")
+def reject_command(app: ShellApp, args: list[str]):
+    """拒绝审批请求"""
+    if not args:
+        console.print("用法: /reject <approval-id>")
+        return
+    app.respond_approval(args[0], ApprovalResponse.REJECT)
 
 
 @meta_command(kimi_soul_only=True)

@@ -17,13 +17,15 @@ from kimi_cli.soul import LLMNotSet, LLMNotSupported, MaxStepsReached, RunCancel
 from kimi_cli.soul.kimisoul import KimiSoul
 from kimi_cli.ui.shell.console import console
 from kimi_cli.ui.shell.metacmd import get_meta_command
-from kimi_cli.ui.shell.prompt import CustomPromptSession, PromptMode, toast
+from kimi_cli.ui.shell.prompt import CustomPromptSession, PromptMode, UserInput, toast
 from kimi_cli.ui.shell.replay import replay_recent_history
+from kimi_cli.ui.shell.task_manager import ShellTaskManager
 from kimi_cli.ui.shell.update import LATEST_VERSION_FILE, UpdateResult, do_update, semver_tuple
 from kimi_cli.ui.shell.visualize import visualize
 from kimi_cli.utils.logging import logger
 from kimi_cli.utils.signals import install_sigint_handler
 from kimi_cli.utils.term import ensure_new_line
+from kimi_cli.wire.message import ApprovalResponse
 
 
 class ShellApp:
@@ -31,6 +33,7 @@ class ShellApp:
         self.soul = soul
         self._welcome_info = list(welcome_info or [])
         self._background_tasks: set[asyncio.Task[Any]] = set()
+        self._task_manager: ShellTaskManager | None = None
 
     async def run(self, command: str | None = None) -> bool:
         if command is not None:
@@ -45,49 +48,56 @@ class ShellApp:
         if isinstance(self.soul, KimiSoul):
             await replay_recent_history(self.soul.context.history)
 
-        with CustomPromptSession(
-            status_provider=lambda: self.soul.status,
-            model_capabilities=self.soul.model_capabilities or set(),
-            initial_thinking=isinstance(self.soul, KimiSoul) and self.soul.thinking,
-        ) as prompt_session:
-            while True:
-                try:
-                    ensure_new_line()
-                    user_input = await prompt_session.prompt()
-                except KeyboardInterrupt:
-                    logger.debug("Exiting by KeyboardInterrupt")
-                    console.print("[grey50]Tip: press Ctrl-D or send 'exit' to quit[/grey50]")
-                    continue
-                except EOFError:
-                    logger.debug("Exiting by EOF")
-                    console.print("Bye!")
-                    break
+        manager = ShellTaskManager(self.soul)
+        manager.start()
+        self._task_manager = manager
+        try:
+            with CustomPromptSession(
+                status_provider=lambda: self.soul.status,
+                model_capabilities=self.soul.model_capabilities or set(),
+                initial_thinking=isinstance(self.soul, KimiSoul) and self.soul.thinking,
+            ) as prompt_session:
+                while True:
+                    try:
+                        ensure_new_line()
+                        user_input = await prompt_session.prompt()
+                    except KeyboardInterrupt:
+                        logger.debug("Exiting by KeyboardInterrupt")
+                        console.print("[grey50]Tip: press Ctrl-D or send 'exit' to quit[/grey50]")
+                        continue
+                    except EOFError:
+                        logger.debug("Exiting by EOF")
+                        console.print("Bye!")
+                        break
 
-                if not user_input:
-                    logger.debug("Got empty input, skipping")
-                    continue
-                logger.debug("Got user input: {user_input}", user_input=user_input)
+                    if not user_input:
+                        logger.debug("Got empty input, skipping")
+                        continue
+                    logger.debug("Got user input: {user_input}", user_input=user_input)
 
-                if user_input.command in ["exit", "quit", "/exit", "/quit"]:
-                    logger.debug("Exiting by meta command")
-                    console.print("Bye!")
-                    break
+                    if user_input.command in ["exit", "quit", "/exit", "/quit"]:
+                        logger.debug("Exiting by meta command")
+                        console.print("Bye!")
+                        break
 
-                if user_input.mode == PromptMode.SHELL:
-                    await self._run_shell_command(user_input.command)
-                    continue
+                    if user_input.mode == PromptMode.SHELL:
+                        await self._run_shell_command(user_input.command)
+                        continue
 
-                if user_input.command.startswith("/"):
-                    logger.debug("Running meta command: {command}", command=user_input.command)
-                    await self._run_meta_command(user_input.command[1:])
-                    continue
+                    if user_input.command.startswith("/"):
+                        logger.debug("Running meta command: {command}", command=user_input.command)
+                        await self._run_meta_command(user_input.command[1:])
+                        continue
 
-                logger.info(
-                    "Running agent command: {command} with thinking {thinking}",
-                    command=user_input.content,
-                    thinking="on" if user_input.thinking else "off",
-                )
-                await self._run_soul_command(user_input.content, user_input.thinking)
+                    logger.info(
+                        "Queue agent command: {command} with thinking {thinking}",
+                        command=user_input.content,
+                        thinking="on" if user_input.thinking else "off",
+                    )
+                    self._enqueue_agent_command(user_input)
+        finally:
+            await manager.shutdown()
+            self._task_manager = None
 
         return True
 
@@ -156,6 +166,71 @@ class ShellApp:
             logger.exception("Unknown error:")
             console.print(f"[red]Unknown error: {e}[/red]")
             raise  # re-raise unknown error
+
+    def _enqueue_agent_command(self, user_input: UserInput) -> None:
+        payload: str | list[ContentPart]
+        payload = user_input.content if user_input.content else user_input.command
+        if self._task_manager is None:
+            # fallback (should not happen in interactive mode)
+            self._start_background_task(self._run_soul_command(payload, user_input.thinking))
+            return
+        task = self._task_manager.submit(
+            command_text=user_input.command,
+            user_input=payload,
+            thinking=user_input.thinking,
+        )
+        console.print(f"[cyan]任务 {task.id} 已加入队列[/cyan]")
+
+    def _require_task_manager(self) -> ShellTaskManager | None:
+        if self._task_manager is None:
+            console.print("[grey50]任务队列仅在交互式 Shell 模式可用。[/grey50]")
+            return None
+        return self._task_manager
+
+    def show_tasks(self) -> None:
+        manager = self._require_task_manager()
+        if manager is None:
+            return
+        console.print(manager.list_tasks())
+
+    def show_approvals(self) -> None:
+        manager = self._require_task_manager()
+        if manager is None:
+            return
+        approvals = manager.list_approvals()
+        if not approvals:
+            console.print("[grey50]暂无待处理审批。[/grey50]")
+            return
+        table = Table(title="待审批操作", box=None, show_lines=False)
+        table.add_column("审批ID", style="cyan")
+        table.add_column("任务", justify="right")
+        table.add_column("请求方", style="blue")
+        table.add_column("描述")
+        for entry in approvals:
+            table.add_row(
+                entry.request.id,
+                str(entry.task_id),
+                entry.request.sender,
+                entry.request.description,
+            )
+        console.print(table)
+
+    def respond_approval(self, approval_id: str, response: ApprovalResponse) -> None:
+        manager = self._require_task_manager()
+        if manager is None:
+            return
+        console.print(manager.resolve_approval(approval_id, response))
+
+    def cancel_task(self, task_id_text: str) -> None:
+        manager = self._require_task_manager()
+        if manager is None:
+            return
+        try:
+            task_id = int(task_id_text)
+        except ValueError:
+            console.print("[red]任务 ID 必须是数字。[/red]")
+            return
+        console.print(manager.cancel_task(task_id))
 
     async def _run_soul_command(
         self,

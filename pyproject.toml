@@ -23,6 +23,7 @@ dependencies = [
     "fastmcp==2.12.5",
     "pydantic==2.12.4",
     "httpx[socks]==0.28.1",
+    "requests>=2.32.5",
 ]
 
 [dependency-groups]
@@ -42,6 +43,10 @@ build-backend = "uv_build"
 [tool.uv.build-backend]
 module-name = ["kimi_cli"]
 source-exclude = ["tests/**/*", "src/kimi_cli/deps/**/*"]
+
+[[tool.uv.index]]
+url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+default = true
 
 [project.scripts]
 kimi = "kimi_cli.cli:cli"
