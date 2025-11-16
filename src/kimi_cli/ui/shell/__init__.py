@@ -19,7 +19,7 @@ from kimi_cli.ui.shell.console import console
 from kimi_cli.ui.shell.metacmd import get_meta_command
 from kimi_cli.ui.shell.prompt import CustomPromptSession, PromptMode, UserInput, toast
 from kimi_cli.ui.shell.replay import replay_recent_history
-from kimi_cli.ui.shell.task_manager import ShellTaskManager
+from kimi_cli.ui.shell.task_manager import ApprovalEntry, ShellTaskManager
 from kimi_cli.ui.shell.update import LATEST_VERSION_FILE, UpdateResult, do_update, semver_tuple
 from kimi_cli.ui.shell.visualize import visualize
 from kimi_cli.utils.logging import logger
@@ -34,6 +34,7 @@ class ShellApp:
         self._welcome_info = list(welcome_info or [])
         self._background_tasks: set[asyncio.Task[Any]] = set()
         self._task_manager: ShellTaskManager | None = None
+        self._pending_approval_ids: set[str] = set()
 
     async def run(self, command: str | None = None) -> bool:
         if command is not None:
@@ -48,12 +49,17 @@ class ShellApp:
         if isinstance(self.soul, KimiSoul):
             await replay_recent_history(self.soul.context.history)
 
-        manager = ShellTaskManager(self.soul)
+        manager = ShellTaskManager(
+            self.soul,
+            on_waiting_approval=self._on_waiting_approval,
+            on_approval_resolved=self._on_approval_resolved,
+        )
         manager.start()
         self._task_manager = manager
         try:
             with CustomPromptSession(
                 status_provider=lambda: self.soul.status,
+                status_note_provider=self._approval_status_note,
                 model_capabilities=self.soul.model_capabilities or set(),
                 initial_thinking=isinstance(self.soul, KimiSoul) and self.soul.thinking,
             ) as prompt_session:
@@ -174,11 +180,46 @@ class ShellApp:
             # fallback (should not happen in interactive mode)
             self._start_background_task(self._run_soul_command(payload, user_input.thinking))
             return
-        task = self._task_manager.submit(
+        self._task_manager.submit(
             command_text=user_input.command,
             user_input=payload,
             thinking=user_input.thinking,
         )
+
+    def _on_waiting_approval(self, entry: ApprovalEntry) -> None:
+        self._pending_approval_ids.add(entry.request.id)
+        toast(
+            (
+                f"审批等待：{entry.request.sender} 想要 {entry.request.action}. "
+                f"运行 /approve {entry.request.id} 进行授权"
+            ),
+            topic="approval",
+            duration=6.0,
+            immediate=True,
+        )
+
+    def _on_approval_resolved(self, entry: ApprovalEntry, response: ApprovalResponse) -> None:
+        self._pending_approval_ids.discard(entry.request.id)
+        if response is ApprovalResponse.REJECT:
+            toast(
+                f"已拒绝审批 {entry.request.id}",
+                topic="approval",
+                duration=4.0,
+                immediate=True,
+            )
+        else:
+            toast(
+                f"已处理审批 {entry.request.id}",
+                topic="approval",
+                duration=4.0,
+                immediate=True,
+            )
+
+    def _approval_status_note(self) -> str | None:
+        if not self._pending_approval_ids:
+            return None
+        count = len(self._pending_approval_ids)
+        return f"审批待处理: {count}"
 
     def _require_task_manager(self) -> ShellTaskManager | None:
         if self._task_manager is None:

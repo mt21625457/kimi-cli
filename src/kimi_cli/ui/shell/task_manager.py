@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 
 from kosong.message import ContentPart, TextPart, ThinkPart, ToolCall, ToolCallPart
 from kosong.tooling import ToolOk, ToolResult
+from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
@@ -72,13 +73,24 @@ class ApprovalEntry:
     request: ApprovalRequest
 
 
+ApprovalWaitCallback = Callable[["ApprovalEntry"], None]
+ApprovalResolvedCallback = Callable[["ApprovalEntry", ApprovalResponse], None]
+
+
 class TaskStateStore:
     """In-memory store for shell tasks and approvals."""
 
-    def __init__(self):
+    def __init__(
+        self,
+        *,
+        on_waiting_approval: ApprovalWaitCallback | None = None,
+        on_approval_resolved: ApprovalResolvedCallback | None = None,
+    ):
         self._tasks: dict[int, ShellTask] = {}
         self._approvals: dict[str, ApprovalEntry] = {}
         self._next_id = 1
+        self._on_waiting_approval = on_waiting_approval
+        self._on_approval_resolved = on_approval_resolved
 
     def create_task(
         self,
@@ -117,17 +129,30 @@ class TaskStateStore:
             return
         task.status = TaskStatus.WAITING_APPROVAL
         task.pending_approvals.add(request.id)
-        self._approvals[request.id] = ApprovalEntry(task_id=task_id, request=request)
-        self._log(
-            task_id,
-            (
-                "Approval required: "
-                f"{request.sender} wants to {request.action} ({request.description}). "
-                f"Respond with `/approve {request.id}`, `/approve-session {request.id}` "
-                f"或 `/reject {request.id}`."
-            ),
-            style="yellow",
+        entry = ApprovalEntry(task_id=task_id, request=request)
+        self._approvals[request.id] = entry
+        message_lines = [
+            f"{request.sender} 想要 {request.action}",
+        ]
+        if request.description:
+            message_lines.append(f"描述：{request.description}")
+        message_lines.extend(
+            [
+                "指令：",
+                f"  • /approve {request.id}  # 批准本次请求",
+                f"  • /approve-session {request.id}  # 本会话自动批准",
+                f"  • /reject {request.id}  # 拒绝",
+            ]
         )
+        console.print(
+            Panel.fit(
+                Text("\n".join(message_lines)),
+                title="审批请求",
+                border_style="yellow",
+            )
+        )
+        if self._on_waiting_approval:
+            self._on_waiting_approval(entry)
 
     def resolve_approval(self, approval_id: str, response: ApprovalResponse) -> str:
         entry = self._approvals.pop(approval_id, None)
@@ -145,6 +170,8 @@ class TaskStateStore:
             ApprovalResponse.REJECT: "已拒绝",
         }[response]
         self._log(entry.task_id, f"{action}审批请求 {approval_id}", style="cyan")
+        if self._on_approval_resolved:
+            self._on_approval_resolved(entry, response)
         return f"{action}。"
 
     def mark_succeeded(self, task_id: int) -> None:
@@ -215,19 +242,30 @@ class TaskStateStore:
             table.add_row("-", "-", "暂无任务", "-")
         return table
 
-    def _log(self, task_id: int, message: str, *, style: str | None = None, plain: bool = False) -> None:
+    def _log(
+        self, task_id: int, message: str, *, style: str | None = None, plain: bool = False
+    ) -> None:
         _ = task_id  # 仅用于兼容旧调用，输出中不再展示任务编号
         applied_style = style if style or plain else "grey70"
-        body = Text(message, style=applied_style)
+        body = Text(message, style=applied_style or "")
         console.print(body)
 
 
 class ShellTaskManager:
     """Manage background execution of soul commands in Shell UI."""
 
-    def __init__(self, soul: Soul):
+    def __init__(
+        self,
+        soul: Soul,
+        *,
+        on_waiting_approval: ApprovalWaitCallback | None = None,
+        on_approval_resolved: ApprovalResolvedCallback | None = None,
+    ):
         self._soul = soul
-        self._store = TaskStateStore()
+        self._store = TaskStateStore(
+            on_waiting_approval=on_waiting_approval,
+            on_approval_resolved=on_approval_resolved,
+        )
         self._queue: asyncio.Queue[int] = asyncio.Queue()
         self._executor_task: asyncio.Task[None] | None = None
 
@@ -301,7 +339,7 @@ class ShellTaskManager:
                     self._soul.set_thinking(task.thinking)
             await run_soul(
                 self._soul,
-                task.user_input,
+                task.user_input if isinstance(task.user_input, str) else list(task.user_input),
                 lambda wire: _TaskObserver(self._store, task.id).observe(wire),
                 cancel_event,
             )
@@ -397,12 +435,9 @@ class _TaskObserver:
                 )
             case ApprovalRequest():
                 self._store.mark_waiting_approval(self._task_id, msg)
-            case SubagentEvent(event=sub_event):
-                self._store.append_log(
-                    self._task_id,
-                    f"子代理事件 {type(sub_event).__name__}",
-                    style="grey50",
-                )
+            case SubagentEvent():
+                # 子代理事件通常是噪声，忽略即可。
+                return
             case _:
                 self._store.append_log(self._task_id, f"收到事件 {type(msg).__name__}")
 
@@ -414,7 +449,7 @@ class _TaskObserver:
                 return None
             return text
         if isinstance(part, ThinkPart):
-            text = part.text.strip()
+            text = part.think.strip()
             if not text:
                 return None
             prefix = "思考"
