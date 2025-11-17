@@ -37,6 +37,7 @@ from prompt_toolkit.filters import Condition, has_completions
 from prompt_toolkit.formatted_text import FormattedText
 from prompt_toolkit.history import InMemoryHistory
 from prompt_toolkit.key_binding import KeyBindings, KeyPressEvent
+from prompt_toolkit.styles import Style
 from pydantic import BaseModel, ValidationError
 
 from kimi_cli.llm import ModelCapability
@@ -51,6 +52,18 @@ from kimi_cli.utils.string import random_string
 PROMPT_SYMBOL = "✨"
 PROMPT_SYMBOL_SHELL = "$"
 PROMPT_SYMBOL_THINKING = "💫"
+
+
+_PROMPT_STYLE = Style.from_dict(
+    {
+        # `noreverse` prevents prompt_toolkit's default reverse video background.
+        "bottom-toolbar": "noreverse bg:default fg:#7f7f7f",
+        "toolbar.status": "fg:#8d8d8d bold",
+        "toolbar.mode": "fg:#9a9a9a",
+        "toolbar.shortcut": "fg:#6e6e6e",
+        "toolbar.toast": "fg:#bba173",
+    }
+)
 
 
 class MetaCommandCompleter(Completer):
@@ -393,6 +406,16 @@ class PromptMode(Enum):
         return self.value
 
 
+@dataclass(slots=True, frozen=True)
+class _ToolbarSignature:
+    mode: PromptMode
+    thinking: bool
+    context_usage: float
+    note_text: str
+    toast_topic: str | None
+    toast_message: str | None
+
+
 class UserInput(BaseModel):
     mode: PromptMode
     thinking: bool
@@ -421,6 +444,20 @@ class _ToastEntry:
 
 _toast_queue = deque[_ToastEntry]()
 """The queue of toasts to show, including the one currently being shown (the first one)."""
+
+
+def _tick_toasts(delta: float) -> None:
+    remaining = delta
+    if not _toast_queue or remaining <= 0:
+        return
+
+    while _toast_queue and remaining > 0:
+        current = _toast_queue[0]
+        current.duration -= remaining
+        if current.duration > 0:
+            break
+        remaining = -current.duration
+        _toast_queue.popleft()
 
 
 def toast(
@@ -483,6 +520,8 @@ class CustomPromptSession:
         self._thinking = initial_thinking
         self._attachment_parts: dict[str, ContentPart] = {}
         """Mapping from attachment id to ContentPart."""
+        self._toolbar_signature: _ToolbarSignature | None = None
+        self._toolbar_columns: int | None = None
 
         history_entries = _load_history_entries(self._history_file)
         history = InMemoryHistory()
@@ -577,6 +616,7 @@ class CustomPromptSession:
             clipboard=clipboard,
             history=history,
             bottom_toolbar=self._render_bottom_toolbar,
+            style=_PROMPT_STYLE,
         )
 
         # Allow completion to be triggered when the text is changed,
@@ -619,11 +659,25 @@ class CustomPromptSession:
             return self
 
         async def _refresh(interval: float) -> None:
+            last_tick = time.monotonic()
             try:
                 while True:
                     app = get_app_or_none()
                     if app is not None:
-                        app.invalidate()
+                        now = time.monotonic()
+                        _tick_toasts(now - last_tick)
+                        last_tick = now
+                        columns = app.output.get_size().columns
+                        signature = self._snapshot_toolbar_signature()
+                        if (
+                            signature != self._toolbar_signature
+                            or columns != self._toolbar_columns
+                        ):
+                            self._toolbar_signature = signature
+                            self._toolbar_columns = columns
+                            app.invalidate()
+                    else:
+                        last_tick = time.monotonic()
 
                     try:
                         asyncio.get_running_loop()
@@ -756,52 +810,107 @@ class CustomPromptSession:
         app = get_app_or_none()
         assert app is not None
         columns = app.output.get_size().columns
-
+        self._toolbar_columns = columns
+        signature = self._toolbar_signature or self._snapshot_toolbar_signature()
         fragments: list[tuple[str, str]] = []
 
-        now_text = datetime.now().strftime("%H:%M")
-        fragments.extend([("", now_text), ("", " " * 2)])
-        columns -= len(now_text) + 2
+        def _append(text: str, style: str = "", *, gap: int = 1) -> None:
+            nonlocal columns
+            if not text or columns <= 0:
+                return
+            text = text.strip()
+            if not text:
+                return
+            if gap and columns > 0:
+                width = min(gap, columns)
+                fragments.append(("", " " * width))
+                columns -= width
+            if columns <= 0:
+                return
+            if len(text) > columns:
+                if columns <= 1:
+                    return
+                text = text[: columns - 1] + "…"
+            fragments.append((style, text))
+            columns -= len(text)
 
-        mode = str(self._mode).lower()
-        if self._mode == PromptMode.AGENT and self._thinking:
-            mode += " (thinking)"
-        fragments.extend([("", f"{mode}"), ("", " " * 2)])
-        columns -= len(mode) + 2
+        context_left = max(0.0, min(1.0 - signature.context_usage, 1.0))
+        context_text = f"{context_left:.0%} context left"
+        fragments.append(("class:toolbar.status", context_text))
+        columns -= len(context_text)
 
-        status = self._status_provider()
-        status_text = self._format_status(status)
-        note = self._status_note_provider()
-        note_text = note.strip() if isinstance(note, str) else (note or "")
-        if note_text:
-            status_text = f"{status_text} | {note_text}"
-
-        current_toast = _current_toast()
-        if current_toast is not None:
-            fragments.extend([("", current_toast.message), ("", " " * 2)])
-            columns -= len(current_toast.message) + 2
-            current_toast.duration -= _REFRESH_INTERVAL
-            if current_toast.duration <= 0.0:
-                _toast_queue.popleft()
+        if signature.toast_message:
+            _append(signature.toast_message, "class:toolbar.toast", gap=2)
+        elif signature.note_text:
+            _append(signature.note_text, "class:toolbar.mode", gap=2)
         else:
+            mode_text = signature.mode.value
+            if signature.mode == PromptMode.AGENT and signature.thinking:
+                mode_text += " · thinking"
+            _append(mode_text, "class:toolbar.mode", gap=2)
+
             shortcuts = [
                 *self._shortcut_hints,
                 "ctrl-d: exit",
             ]
             for shortcut in shortcuts:
-                if columns - len(status_text) > len(shortcut) + 2:
-                    fragments.extend([("", shortcut), ("", " " * 2)])
-                    columns -= len(shortcut) + 2
-                else:
-                    break
-
-        padding = max(1, columns - len(status_text))
-        fragments.append(("", " " * padding))
-        fragments.append(("", status_text))
+                _append(shortcut, "class:toolbar.shortcut", gap=2)
 
         return FormattedText(fragments)
 
-    @staticmethod
-    def _format_status(status: StatusSnapshot) -> str:
-        bounded = max(0.0, min(status.context_usage, 1.0))
-        return f"context: {bounded:.1%}"
+    def _snapshot_toolbar_signature(self) -> _ToolbarSignature:
+        status = self._status_provider()
+        note = self._status_note_provider()
+        note_text = note.strip() if isinstance(note, str) else (note or "")
+        toast_entry = _current_toast()
+        return _ToolbarSignature(
+            mode=self._mode,
+            thinking=self._thinking,
+            context_usage=max(0.0, min(status.context_usage, 1.0)),
+            note_text=note_text,
+            toast_topic=toast_entry.topic if toast_entry else None,
+            toast_message=toast_entry.message if toast_entry else None,
+        )
+
+class BasicPromptSession:
+    """Simple line-oriented prompt for environments without full TTY support."""
+
+    def __init__(
+        self,
+        *,
+        status_provider: Callable[[], StatusSnapshot],  # noqa: ARG002
+        status_note_provider: Callable[[], str | None] | None = None,  # noqa: ARG002
+        model_capabilities: set[ModelCapability] | None = None,  # noqa: ARG002
+        initial_thinking: bool,
+    ) -> None:
+        self._thinking = initial_thinking
+        self._mode = PromptMode.AGENT
+
+    def __enter__(self) -> "BasicPromptSession":
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:  # noqa: ARG002
+        return None
+
+    async def prompt(self) -> UserInput:
+        symbol = (
+            PROMPT_SYMBOL_THINKING
+            if self._mode == PromptMode.AGENT and self._thinking
+            else PROMPT_SYMBOL
+            if self._mode == PromptMode.AGENT
+            else PROMPT_SYMBOL_SHELL
+        )
+        prompt_text = f"{getpass.getuser()}{symbol} "
+        line = await asyncio.to_thread(input, prompt_text)
+        line = line.replace("\x00", "").strip()
+
+        content: list[ContentPart] = []
+        if line:
+            content.append(TextPart(text=line))
+
+        return UserInput(
+            mode=self._mode,
+            thinking=self._thinking,
+            command=line,
+            content=content,
+        )

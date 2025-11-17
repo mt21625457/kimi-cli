@@ -311,7 +311,7 @@ class _LiveView:
             self.compose(),
             console=console,
             refresh_per_second=10,
-            transient=True,
+            transient=False,
             vertical_overflow="visible",
         ) as live:
 

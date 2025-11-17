@@ -4,6 +4,7 @@ import asyncio
 from collections.abc import Awaitable, Coroutine
 from dataclasses import dataclass
 from enum import Enum
+import sys
 from typing import Any
 
 from kosong.chat_provider import APIStatusError, ChatProviderError
@@ -20,7 +21,13 @@ from kimi_cli.soul import LLMNotSet, LLMNotSupported, MaxStepsReached, RunCancel
 from kimi_cli.soul.kimisoul import KimiSoul
 from kimi_cli.ui.shell.console import console
 from kimi_cli.ui.shell.metacmd import get_meta_command
-from kimi_cli.ui.shell.prompt import CustomPromptSession, PromptMode, UserInput, toast
+from kimi_cli.ui.shell.prompt import (
+    BasicPromptSession,
+    CustomPromptSession,
+    PromptMode,
+    UserInput,
+    toast,
+)
 from kimi_cli.ui.shell.replay import replay_recent_history
 from kimi_cli.ui.shell.task_manager import (
     ApprovalEntry,
@@ -71,6 +78,8 @@ class ShellApp:
         )
         manager.start()
         self._task_manager = manager
+        supports_rich_prompt = sys.stdin.isatty() and sys.stdout.isatty()
+
         try:
             with patch_stdout(raw=True):
                 refresh_hz = max(0.1, 1.0 / max(0.1, banner_settings.refresh_interval))
@@ -82,8 +91,14 @@ class ShellApp:
                     vertical_overflow="visible",
                 ) as live:
                     manager.set_live_updater(lambda: live.update(manager.render_live()))
+                    prompt_cls = CustomPromptSession
+                    if not supports_rich_prompt:
+                        console.print(
+                            "[yellow]Interactive TTY not detected. Falling back to basic prompt mode.[/yellow]"
+                        )
+                        prompt_cls = BasicPromptSession
                     try:
-                        with CustomPromptSession(
+                        with prompt_cls(
                             status_provider=lambda: self.soul.status,
                             status_note_provider=self._approval_status_note,
                             model_capabilities=self.soul.model_capabilities or set(),
