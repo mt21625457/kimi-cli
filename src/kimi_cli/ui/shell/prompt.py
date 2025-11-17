@@ -37,7 +37,6 @@ from prompt_toolkit.filters import Condition, has_completions
 from prompt_toolkit.formatted_text import FormattedText
 from prompt_toolkit.history import InMemoryHistory
 from prompt_toolkit.key_binding import KeyBindings, KeyPressEvent
-from prompt_toolkit.patch_stdout import patch_stdout
 from pydantic import BaseModel, ValidationError
 
 from kimi_cli.llm import ModelCapability
@@ -590,10 +589,12 @@ class CustomPromptSession:
         self._status_refresh_task: asyncio.Task | None = None
 
     def _render_message(self) -> FormattedText:
+        fragments: list[tuple[str, str]] = []
         symbol = PROMPT_SYMBOL if self._mode == PromptMode.AGENT else PROMPT_SYMBOL_SHELL
         if self._mode == PromptMode.AGENT and self._thinking:
             symbol = PROMPT_SYMBOL_THINKING
-        return FormattedText([("bold", f"{getpass.getuser()}{symbol} ")])
+        fragments.append(("bold", f"{getpass.getuser()}{symbol} "))
+        return FormattedText(fragments)
 
     def _apply_mode(self, event: KeyPressEvent | None = None) -> None:
         # Apply mode to the active buffer (not the PromptSession itself)
@@ -645,6 +646,14 @@ class CustomPromptSession:
         self._status_refresh_task = None
         self._attachment_parts.clear()
 
+    def invalidate(self) -> None:
+        try:
+            app = self._session.app
+        except AttributeError:
+            app = get_app_or_none()
+        if app is not None:
+            app.invalidate()
+
     def _try_paste_image(self, event: KeyPressEvent) -> bool:
         """Try to paste an image from the clipboard. Return True if successful."""
         # Try get image from clipboard
@@ -689,9 +698,8 @@ class CustomPromptSession:
         return True
 
     async def prompt(self) -> UserInput:
-        with patch_stdout(raw=True):
-            command = str(await self._session.prompt_async()).strip()
-            command = command.replace("\x00", "")  # just in case null bytes are somehow inserted
+        command = str(await self._session.prompt_async()).strip()
+        command = command.replace("\x00", "")  # just in case null bytes are somehow inserted
         self._append_history_entry(command)
 
         # Parse rich content parts

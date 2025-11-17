@@ -4,15 +4,19 @@ import asyncio
 import contextlib
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime
+import os
+import time
+from datetime import datetime, timedelta
 from enum import Enum
 
 from kosong.message import ContentPart, TextPart, ThinkPart, ToolCall, ToolCallPart
 from kosong.tooling import ToolOk, ToolResult
+from rich.console import Group, RenderableType
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
+from kimi_cli.config import Config
 from kimi_cli.soul import (
     LLMNotSet,
     LLMNotSupported,
@@ -47,6 +51,12 @@ class TaskStatus(str, Enum):
     CANCELLED = "cancelled"
 
 
+class ColorMode(Enum):
+    TRUECOLOR = "truecolor"
+    LIMITED = "limited"
+    MONO = "mono"
+
+
 @dataclass(slots=True)
 class ShellTask:
     id: int
@@ -54,9 +64,11 @@ class ShellTask:
     user_input: str | Sequence[ContentPart]
     thinking: bool | None
     created_at: datetime = field(default_factory=datetime.now)
+    last_active_at: datetime = field(default_factory=datetime.now)
     status: TaskStatus = TaskStatus.QUEUED
     started_at: datetime | None = None
     finished_at: datetime | None = None
+    fade_deadline: datetime | None = None
     cancel_event: asyncio.Event = field(default_factory=asyncio.Event)
     logs: list[str] = field(default_factory=list)
     pending_approvals: set[str] = field(default_factory=set)
@@ -77,6 +89,22 @@ ApprovalWaitCallback = Callable[["ApprovalEntry"], None]
 ApprovalResolvedCallback = Callable[["ApprovalEntry", ApprovalResponse], None]
 
 
+@dataclass(slots=True)
+class TaskBannerSettings:
+    visible_slots: int = 4
+    refresh_interval: float = 1.0
+
+    @classmethod
+    def from_config(cls, config: Config | None) -> "TaskBannerSettings":
+        if config is None:
+            return cls()
+        banner = config.shell.task_banner
+        return cls(
+            visible_slots=banner.visible_slots,
+            refresh_interval=banner.refresh_interval,
+        )
+
+
 class TaskStateStore:
     """In-memory store for shell tasks and approvals."""
 
@@ -85,12 +113,14 @@ class TaskStateStore:
         *,
         on_waiting_approval: ApprovalWaitCallback | None = None,
         on_approval_resolved: ApprovalResolvedCallback | None = None,
+        on_tasks_changed: Callable[[], None] | None = None,
     ):
         self._tasks: dict[int, ShellTask] = {}
         self._approvals: dict[str, ApprovalEntry] = {}
         self._next_id = 1
         self._on_waiting_approval = on_waiting_approval
         self._on_approval_resolved = on_approval_resolved
+        self._on_tasks_changed = on_tasks_changed
 
     def create_task(
         self,
@@ -108,6 +138,7 @@ class TaskStateStore:
         self._next_id += 1
         self._tasks[task.id] = task
         self._log(task.id, f"Queued `{command_text}`", silent=True)
+        self._notify_change()
         return task
 
     def tasks(self) -> list[ShellTask]:
@@ -120,7 +151,9 @@ class TaskStateStore:
         if task := self.get(task_id):
             task.status = TaskStatus.RUNNING
             task.started_at = datetime.now()
+            task.last_active_at = task.started_at
             self._log(task_id, "Started", silent=True)
+            self._notify_change()
 
     def mark_waiting_approval(self, task_id: int, request: ApprovalRequest) -> None:
         task = self.get(task_id)
@@ -128,6 +161,7 @@ class TaskStateStore:
             request.resolve(ApprovalResponse.REJECT)
             return
         task.status = TaskStatus.WAITING_APPROVAL
+        task.last_active_at = datetime.now()
         task.pending_approvals.add(request.id)
         entry = ApprovalEntry(task_id=task_id, request=request)
         self._approvals[request.id] = entry
@@ -153,6 +187,7 @@ class TaskStateStore:
         )
         if self._on_waiting_approval:
             self._on_waiting_approval(entry)
+        self._notify_change()
 
     def resolve_approval(self, approval_id: str, response: ApprovalResponse) -> str:
         entry = self._approvals.pop(approval_id, None)
@@ -163,6 +198,7 @@ class TaskStateStore:
             task.pending_approvals.discard(approval_id)
             if not task.pending_approvals and task.status == TaskStatus.WAITING_APPROVAL:
                 task.status = TaskStatus.RUNNING
+                task.last_active_at = datetime.now()
         entry.request.resolve(response)
         action = {
             ApprovalResponse.APPROVE: "已批准",
@@ -172,33 +208,45 @@ class TaskStateStore:
         self._log(entry.task_id, f"{action}审批请求 {approval_id}", style="cyan")
         if self._on_approval_resolved:
             self._on_approval_resolved(entry, response)
+        self._notify_change()
         return f"{action}。"
 
     def mark_succeeded(self, task_id: int) -> None:
         if task := self.get(task_id):
             task.status = TaskStatus.SUCCEEDED
             task.finished_at = datetime.now()
+            task.last_active_at = task.finished_at
+            task.fade_deadline = task.finished_at + timedelta(seconds=3)
             self._log(task_id, "完成", style="green")
+            self._notify_change()
 
     def mark_failed(self, task_id: int, reason: str) -> None:
         if task := self.get(task_id):
             task.status = TaskStatus.FAILED
             task.finished_at = datetime.now()
+            task.last_active_at = task.finished_at
+            task.fade_deadline = task.finished_at + timedelta(seconds=3)
             self._log(task_id, f"失败：{reason}", style="red")
+            self._notify_change()
 
     def mark_cancelling(self, task_id: int) -> None:
         if task := self.get(task_id):
             if task.status in {TaskStatus.SUCCEEDED, TaskStatus.FAILED, TaskStatus.CANCELLED}:
                 return
             task.status = TaskStatus.CANCELLING
+            task.last_active_at = datetime.now()
             self._log(task_id, "正在尝试取消", style="yellow")
+            self._notify_change()
 
     def mark_cancelled(self, task_id: int, reason: str | None = None) -> None:
         if task := self.get(task_id):
             task.status = TaskStatus.CANCELLED
             task.finished_at = datetime.now()
+            task.last_active_at = task.finished_at
+            task.fade_deadline = task.finished_at + timedelta(seconds=3)
             msg = "已取消" + (f"：{reason}" if reason else "")
             self._log(task_id, msg, style="yellow")
+            self._notify_change()
 
     def drop_pending_approvals(self, task_id: int, response: ApprovalResponse) -> None:
         task = self.get(task_id)
@@ -206,6 +254,7 @@ class TaskStateStore:
             return
         for approval_id in list(task.pending_approvals):
             self.resolve_approval(approval_id, response)
+        self._notify_change()
 
     def approvals(self) -> list[ApprovalEntry]:
         return list(self._approvals.values())
@@ -223,7 +272,9 @@ class TaskStateStore:
             task.logs.append(message)
             if len(task.logs) > 20:
                 task.logs.pop(0)
+            task.last_active_at = datetime.now()
         self._log(task_id, message, style=style, plain=plain, silent=silent)
+        self._notify_change()
 
     def build_table(self) -> Table:
         table = Table(title="Shell Tasks", show_lines=False, box=None)
@@ -243,6 +294,15 @@ class TaskStateStore:
             table.add_row("-", "-", "暂无任务", "-")
         return table
 
+    def _touch(self, task: ShellTask | None) -> None:
+        if task is None:
+            return
+        task.last_active_at = datetime.now()
+
+    def _notify_change(self) -> None:
+        if self._on_tasks_changed:
+            self._on_tasks_changed()
+
     def _log(
         self,
         task_id: int,
@@ -252,7 +312,6 @@ class TaskStateStore:
         plain: bool = False,
         silent: bool = False,
     ) -> None:
-        _ = task_id  # 仅用于兼容旧调用，输出中不再展示任务编号
         if silent:
             return
         applied_style = style if style or plain else "grey70"
@@ -267,20 +326,31 @@ class ShellTaskManager:
         self,
         soul: Soul,
         *,
+        banner_settings: TaskBannerSettings | None = None,
         on_waiting_approval: ApprovalWaitCallback | None = None,
         on_approval_resolved: ApprovalResolvedCallback | None = None,
     ):
         self._soul = soul
+        self._banner_settings = banner_settings or TaskBannerSettings()
         self._store = TaskStateStore(
             on_waiting_approval=on_waiting_approval,
             on_approval_resolved=on_approval_resolved,
+            on_tasks_changed=self._handle_tasks_changed,
         )
         self._queue: asyncio.Queue[int] = asyncio.Queue()
         self._executor_task: asyncio.Task[None] | None = None
+        self._banner = TaskBanner(
+            self._store,
+            self._banner_settings,
+        )
+        self._live_updater: Callable[[], None] | None = None
+        self._live_overlays: list[Callable[[], RenderableType | None]] = []
+        self._banner.set_invalidator(self._handle_banner_refresh)
 
     def start(self) -> None:
         if self._executor_task is None:
             self._executor_task = asyncio.create_task(self._executor_loop())
+        self._banner.start()
 
     async def shutdown(self) -> None:
         if self._executor_task:
@@ -288,6 +358,23 @@ class ShellTaskManager:
             with contextlib.suppress(asyncio.CancelledError):
                 await self._executor_task
             self._executor_task = None
+        await self._banner.stop()
+
+    def set_live_updater(self, callback: Callable[[], None] | None) -> None:
+        self._live_updater = callback
+
+    def push_live_overlay(
+        self, provider: Callable[[], RenderableType | None]
+    ) -> Callable[[], None]:
+        self._live_overlays.append(provider)
+        self._banner.request_refresh(force=True)
+
+        def _remove() -> None:
+            with contextlib.suppress(ValueError):
+                self._live_overlays.remove(provider)
+            self._banner.request_refresh(force=True)
+
+        return _remove
 
     def submit(
         self,
@@ -328,6 +415,28 @@ class ShellTaskManager:
         self._store.drop_pending_approvals(task_id, ApprovalResponse.REJECT)
         task.cancel_event.set()
         return "已请求取消任务。"
+
+    def _handle_tasks_changed(self) -> None:
+        self._banner.request_refresh()
+
+    def render_live(self) -> RenderableType:
+        renderables: list[RenderableType] = []
+        banner = self._banner.render()
+        if banner is not None:
+            renderables.append(banner)
+        for provider in list(self._live_overlays):
+            extra = provider()
+            if extra is not None:
+                renderables.append(extra)
+        if not renderables:
+            return Text("")
+        if len(renderables) == 1:
+            return renderables[0]
+        return Group(*renderables)
+
+    def _handle_banner_refresh(self) -> None:
+        if self._live_updater:
+            self._live_updater()
 
     async def _executor_loop(self) -> None:
         while True:
@@ -494,3 +603,265 @@ class _TaskObserver:
                 style="grey50",
                 plain=True,
             )
+
+
+class TaskBanner:
+    """Produce a rich renderable banner for active tasks."""
+
+    GRADIENTS: list[tuple[str, str]] = [
+        ("53b3ff", "c56bff"),
+        ("5fd6ff", "a86bff"),
+        ("64c9ff", "f38bff"),
+        ("6bd9ff", "de93ff"),
+    ]
+    LIMITED_STYLES = ["ansicyan", "ansimagenta", "ansiblue", "ansiviolet"]
+    ASCII_SPINNER = ["-", "\\", "|", "/"]
+    BRAILLE_SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+    FINAL_STATUSES = {
+        TaskStatus.SUCCEEDED,
+        TaskStatus.FAILED,
+        TaskStatus.CANCELLED,
+    }
+    MUTED_STYLE = "fg:#6d6f7a"
+
+    def __init__(
+        self,
+        store: TaskStateStore,
+        settings: TaskBannerSettings,
+        *,
+        on_refresh: Callable[[], None] | None = None,
+    ):
+        self._store = store
+        self._settings = settings
+        self._on_refresh = on_refresh
+        self._frame = 0
+        self._task: asyncio.Task[None] | None = None
+        self._color_mode = self._detect_color_mode()
+        self._refresh_event = asyncio.Event()
+        self._force_next_refresh = False
+        self._last_render_at = time.monotonic() - self._settings.refresh_interval
+        self._idle_rendered = False
+
+    def start(self) -> None:
+        if self._task is not None:
+            return
+        self._task = asyncio.create_task(self._loop())
+        self._refresh_event.set()
+
+    async def stop(self) -> None:
+        if self._task:
+            self._task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._task
+            self._task = None
+
+    def set_invalidator(self, callback: Callable[[], None]) -> None:
+        self._on_refresh = callback
+
+    def request_refresh(self, *, force: bool = False) -> None:
+        if force:
+            self._force_next_refresh = True
+        self._idle_rendered = False
+        self._refresh_event.set()
+
+    async def _loop(self) -> None:
+        interval = self._settings.refresh_interval
+        while True:
+            timeout = interval if self._has_active_lines() else None
+            try:
+                if timeout is None:
+                    await self._refresh_event.wait()
+                else:
+                    await asyncio.wait_for(self._refresh_event.wait(), timeout=timeout)
+            except asyncio.TimeoutError:
+                pass
+            except asyncio.CancelledError:
+                raise
+            self._refresh_event.clear()
+            now = time.monotonic()
+            if not self._force_next_refresh:
+                elapsed = now - self._last_render_at
+                if timeout is not None and elapsed < interval:
+                    await asyncio.sleep(interval - elapsed)
+                    now = time.monotonic()
+            self._last_render_at = now
+            idle = not self._has_active_lines()
+            if idle and not self._force_next_refresh and self._idle_rendered:
+                continue
+            self._idle_rendered = idle
+            self._force_next_refresh = False
+            self._frame = (self._frame + 1) % 10_000
+            if self._on_refresh:
+                self._on_refresh()
+
+    def render(self) -> RenderableType | None:
+        visible, hidden, now = self._visible_tasks_for_render()
+        lines: list[Text] = []
+        if not visible and hidden == 0:
+            line = Text("暂无任务，执行命令后会显示进度。\n", style=self.MUTED_STYLE)
+            lines.append(line)
+        else:
+            for task in visible:
+                lines.append(self._render_task_line(task, now))
+            if hidden:
+                summary = Text(f"+{hidden} more (use /tasks)\n", style=self.MUTED_STYLE)
+                lines.append(summary)
+        if not lines:
+            return None
+        return Group(*lines)
+
+    def _visible_tasks_for_render(
+        self, now: datetime | None = None
+    ) -> tuple[list[ShellTask], int, datetime]:
+        now = now or datetime.now()
+        active: list[ShellTask] = []
+        trailing: list[ShellTask] = []
+        for task in self._store.tasks():
+            if task.status in self.FINAL_STATUSES:
+                if task.fade_deadline and now >= task.fade_deadline:
+                    continue
+                trailing.append(task)
+            else:
+                active.append(task)
+        active.sort(key=lambda t: t.last_active_at or t.created_at, reverse=True)
+        trailing.sort(
+            key=lambda t: (t.finished_at or t.last_active_at or t.created_at),
+            reverse=True,
+        )
+        ordered = active + trailing
+        slots = max(1, self._settings.visible_slots)
+        visible = ordered[:slots]
+        hidden = max(len(ordered) - slots, 0)
+        return visible, hidden, now
+
+    def _render_task_line(self, task: ShellTask, now: datetime) -> Text:
+        parts: list[tuple[str, str]] = []
+        badge_style = self._badge_style(task)
+        parts.append((badge_style, "■ "))
+        header = f"#{task.id} • {task.short_command(40)} "
+        header_style = "fg:#d7dcff bold" if self._color_mode != ColorMode.MONO else "bold"
+        parts.append((header_style, header))
+        status_fragments = self._status_fragments(task, now)
+        parts.extend(status_fragments)
+        text = Text()
+        for style, chunk in parts:
+            text.append(chunk, style=style)
+        if not text.plain.endswith("\n"):
+            text.append("\n")
+        return text
+
+    def _badge_style(self, task: ShellTask) -> str:
+        if self._color_mode == ColorMode.MONO:
+            return "fg:#777777"
+        if self._color_mode == ColorMode.LIMITED:
+            return self.LIMITED_STYLES[task.id % len(self.LIMITED_STYLES)]
+        start, _ = self._gradient_for_task(task)
+        return f"fg:#{start}"
+
+    def _status_fragments(self, task: ShellTask, now: datetime) -> list[tuple[str, str]]:
+        spinner = self._spinner_for(task)
+        label, hint = self._status_label_and_hint(task)
+        elapsed = self._format_elapsed(task, now)
+        details: list[str] = []
+        if elapsed:
+            details.append(elapsed)
+        if hint:
+            details.append(hint)
+        text = f"{spinner} {label}"
+        if details:
+            text += f" ({' • '.join(details)})"
+        if self._color_mode == ColorMode.TRUECOLOR:
+            start, end = self._gradient_for_task(task)
+            return self._apply_gradient(text, start, end)
+        if self._color_mode == ColorMode.LIMITED:
+            style = self.LIMITED_STYLES[task.id % len(self.LIMITED_STYLES)]
+            return [(style, text)]
+        return [("bold", text)]
+
+    def _apply_gradient(self, text: str, start: str, end: str) -> list[tuple[str, str]]:
+        if not text:
+            return []
+        start_rgb = tuple(int(start[i : i + 2], 16) for i in (0, 2, 4))
+        end_rgb = tuple(int(end[i : i + 2], 16) for i in (0, 2, 4))
+        length = max(1, len(text))
+        fragments: list[tuple[str, str]] = []
+        for index, char in enumerate(text):
+            ratio = index / max(1, length - 1)
+            r = round(start_rgb[0] + (end_rgb[0] - start_rgb[0]) * ratio)
+            g = round(start_rgb[1] + (end_rgb[1] - start_rgb[1]) * ratio)
+            b = round(start_rgb[2] + (end_rgb[2] - start_rgb[2]) * ratio)
+            fragments.append((f"fg:#{r:02x}{g:02x}{b:02x}", char))
+        return fragments
+
+    def _gradient_for_task(self, task: ShellTask) -> tuple[str, str]:
+        return self.GRADIENTS[task.id % len(self.GRADIENTS)]
+
+    def _spinner_for(self, task: ShellTask) -> str:
+        if task.status in {TaskStatus.RUNNING, TaskStatus.CANCELLING}:
+            frames = self.BRAILLE_SPINNER if self._color_mode != ColorMode.MONO else self.ASCII_SPINNER
+            idx = (self._frame + task.id) % len(frames)
+            return frames[idx]
+        if task.status == TaskStatus.WAITING_APPROVAL:
+            return "⧗" if self._color_mode != ColorMode.MONO else "?"
+        if task.status == TaskStatus.QUEUED:
+            return "…" if self._color_mode != ColorMode.MONO else "."
+        if task.status == TaskStatus.SUCCEEDED:
+            return "✓"
+        if task.status == TaskStatus.FAILED:
+            return "✕" if self._color_mode != ColorMode.MONO else "x"
+        if task.status == TaskStatus.CANCELLED:
+            return "⊘" if self._color_mode != ColorMode.MONO else "!"
+        return "-"
+
+    def _status_label_and_hint(self, task: ShellTask) -> tuple[str, str | None]:
+        match task.status:
+            case TaskStatus.RUNNING:
+                return "Working", "esc to interrupt"
+            case TaskStatus.CANCELLING:
+                return "Cancelling", None
+            case TaskStatus.WAITING_APPROVAL:
+                return "Waiting approval", "/approvals"
+            case TaskStatus.QUEUED:
+                return "Queued", f"/cancel {task.id}"
+            case TaskStatus.SUCCEEDED:
+                return "Done", None
+            case TaskStatus.FAILED:
+                return "Failed", "check logs"
+            case TaskStatus.CANCELLED:
+                return "Cancelled", None
+            case _:
+                return task.status.value, None
+
+    def _format_elapsed(self, task: ShellTask, now: datetime) -> str:
+        base = task.started_at or task.created_at
+        end = task.finished_at or now
+        delta = max(0, int((end - base).total_seconds()))
+        if delta < 60:
+            return f"{delta}s"
+        minutes, seconds = divmod(delta, 60)
+        if minutes < 60:
+            return f"{minutes}m {seconds:02d}s"
+        hours, minutes = divmod(minutes, 60)
+        if hours < 24:
+            return f"{hours}h {minutes}m"
+        days, hours = divmod(hours, 24)
+        return f"{days}d {hours}h"
+
+    def _detect_color_mode(self) -> ColorMode:
+        if console.no_color or os.environ.get("NO_COLOR") or os.environ.get("TERM") == "dumb":
+            return ColorMode.MONO
+        system = console.color_system or ""
+        if system == "truecolor":
+            return ColorMode.TRUECOLOR
+        if system in {"standard", "eight_bit", "windows"}:
+            return ColorMode.LIMITED
+        return ColorMode.MONO
+
+    def _has_active_lines(self) -> bool:
+        now = datetime.now()
+        for task in self._store.tasks():
+            if task.status not in self.FINAL_STATUSES:
+                return True
+            if task.fade_deadline and now < task.fade_deadline:
+                return True
+        return False

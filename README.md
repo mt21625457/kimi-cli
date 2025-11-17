@@ -169,6 +169,9 @@ cd kimi-cli
 make prepare  # prepare the development environment
 ```
 
+> [!NOTE]
+> `make prepare` runs `uv sync --group dev`, so all development/test dependencies (including `pytest`) are available for `pytest`, `make test`, etc.
+
 Then you can start working on Kimi CLI.
 
 Refer to the following commands after you make changes:

@@ -90,6 +90,39 @@ class CLIOutputConfig(BaseModel):
     )
 
 
+DEFAULT_VISIBLE_TASK_SLOTS = 4
+DEFAULT_BANNER_REFRESH_INTERVAL = 1.0
+
+
+class TaskBannerConfig(BaseModel):
+    """Shell task banner preferences."""
+
+    visible_slots: int = Field(
+        default=DEFAULT_VISIBLE_TASK_SLOTS,
+        description="Maximum number of task heartbeat rows to display at once.",
+    )
+    refresh_interval: float = Field(
+        default=DEFAULT_BANNER_REFRESH_INTERVAL,
+        description="Seconds between automatic heartbeat refresh ticks.",
+    )
+
+    @model_validator(mode="after")
+    def _clamp_values(self) -> "TaskBannerConfig":
+        if self.visible_slots < 1:
+            self.visible_slots = DEFAULT_VISIBLE_TASK_SLOTS
+        if self.refresh_interval < 0.1:
+            self.refresh_interval = DEFAULT_BANNER_REFRESH_INTERVAL
+        return self
+
+
+class ShellConfig(BaseModel):
+    """Shell UI preferences."""
+
+    task_banner: TaskBannerConfig = Field(
+        default_factory=TaskBannerConfig, description="Heartbeat banner configuration."
+    )
+
+
 class Config(BaseModel):
     """Main configuration structure."""
 
@@ -103,6 +136,7 @@ class Config(BaseModel):
     cli_output: CLIOutputConfig = Field(
         default_factory=CLIOutputConfig, description="CLI output preferences"
     )
+    shell: ShellConfig = Field(default_factory=ShellConfig, description="Shell UI preferences")
 
     @model_validator(mode="after")
     def validate_model(self) -> Self:

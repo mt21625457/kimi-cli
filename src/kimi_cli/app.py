@@ -175,7 +175,7 @@ class KimiCLI:
                 )
             )
         with self._app_env():
-            app = ShellApp(self._soul, welcome_info=welcome_info)
+            app = ShellApp(self._soul, welcome_info=welcome_info, config=self._runtime.config)
             return await app.run(command)
 
     async def run_print_mode(

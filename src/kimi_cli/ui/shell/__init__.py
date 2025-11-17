@@ -8,18 +8,25 @@ from typing import Any
 
 from kosong.chat_provider import APIStatusError, ChatProviderError
 from kosong.message import ContentPart
+from prompt_toolkit.patch_stdout import patch_stdout
 from rich.console import Group, RenderableType
+from rich.live import Live
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
+from kimi_cli.config import Config
 from kimi_cli.soul import LLMNotSet, LLMNotSupported, MaxStepsReached, RunCancelled, Soul, run_soul
 from kimi_cli.soul.kimisoul import KimiSoul
 from kimi_cli.ui.shell.console import console
 from kimi_cli.ui.shell.metacmd import get_meta_command
 from kimi_cli.ui.shell.prompt import CustomPromptSession, PromptMode, UserInput, toast
 from kimi_cli.ui.shell.replay import replay_recent_history
-from kimi_cli.ui.shell.task_manager import ApprovalEntry, ShellTaskManager
+from kimi_cli.ui.shell.task_manager import (
+    ApprovalEntry,
+    ShellTaskManager,
+    TaskBannerSettings,
+)
 from kimi_cli.ui.shell.update import LATEST_VERSION_FILE, UpdateResult, do_update, semver_tuple
 from kimi_cli.ui.shell.visualize import visualize
 from kimi_cli.utils.logging import logger
@@ -29,12 +36,18 @@ from kimi_cli.wire.message import ApprovalResponse
 
 
 class ShellApp:
-    def __init__(self, soul: Soul, welcome_info: list[WelcomeInfoItem] | None = None):
+    def __init__(
+        self,
+        soul: Soul,
+        welcome_info: list[WelcomeInfoItem] | None = None,
+        config: Config | None = None,
+    ):
         self.soul = soul
         self._welcome_info = list(welcome_info or [])
         self._background_tasks: set[asyncio.Task[Any]] = set()
         self._task_manager: ShellTaskManager | None = None
         self._pending_approval_ids: set[str] = set()
+        self._config = config
 
     async def run(self, command: str | None = None) -> bool:
         if command is not None:
@@ -49,58 +62,77 @@ class ShellApp:
         if isinstance(self.soul, KimiSoul):
             await replay_recent_history(self.soul.context.history)
 
+        banner_settings = TaskBannerSettings.from_config(self._config)
         manager = ShellTaskManager(
             self.soul,
+            banner_settings=banner_settings,
             on_waiting_approval=self._on_waiting_approval,
             on_approval_resolved=self._on_approval_resolved,
         )
         manager.start()
         self._task_manager = manager
         try:
-            with CustomPromptSession(
-                status_provider=lambda: self.soul.status,
-                status_note_provider=self._approval_status_note,
-                model_capabilities=self.soul.model_capabilities or set(),
-                initial_thinking=isinstance(self.soul, KimiSoul) and self.soul.thinking,
-            ) as prompt_session:
-                while True:
+            with patch_stdout(raw=True):
+                refresh_hz = max(0.1, 1.0 / max(0.1, banner_settings.refresh_interval))
+                with Live(
+                    manager.render_live(),
+                    console=console,
+                    refresh_per_second=refresh_hz,
+                    transient=False,
+                    vertical_overflow="visible",
+                ) as live:
+                    manager.set_live_updater(lambda: live.update(manager.render_live()))
                     try:
-                        ensure_new_line()
-                        user_input = await prompt_session.prompt()
-                    except KeyboardInterrupt:
-                        logger.debug("Exiting by KeyboardInterrupt")
-                        console.print("[grey50]Tip: press Ctrl-D or send 'exit' to quit[/grey50]")
-                        continue
-                    except EOFError:
-                        logger.debug("Exiting by EOF")
-                        console.print("Bye!")
-                        break
+                        with CustomPromptSession(
+                            status_provider=lambda: self.soul.status,
+                            status_note_provider=self._approval_status_note,
+                            model_capabilities=self.soul.model_capabilities or set(),
+                            initial_thinking=isinstance(self.soul, KimiSoul) and self.soul.thinking,
+                        ) as prompt_session:
+                            while True:
+                                try:
+                                    ensure_new_line()
+                                    user_input = await prompt_session.prompt()
+                                except KeyboardInterrupt:
+                                    logger.debug("Exiting by KeyboardInterrupt")
+                                    console.print(
+                                        "[grey50]Tip: press Ctrl-D or send 'exit' to quit[/grey50]"
+                                    )
+                                    continue
+                                except EOFError:
+                                    logger.debug("Exiting by EOF")
+                                    console.print("Bye!")
+                                    break
 
-                    if not user_input:
-                        logger.debug("Got empty input, skipping")
-                        continue
-                    logger.debug("Got user input: {user_input}", user_input=user_input)
+                                if not user_input:
+                                    logger.debug("Got empty input, skipping")
+                                    continue
+                                logger.debug("Got user input: {user_input}", user_input=user_input)
 
-                    if user_input.command in ["exit", "quit", "/exit", "/quit"]:
-                        logger.debug("Exiting by meta command")
-                        console.print("Bye!")
-                        break
+                                if user_input.command in ["exit", "quit", "/exit", "/quit"]:
+                                    logger.debug("Exiting by meta command")
+                                    console.print("Bye!")
+                                    break
 
-                    if user_input.mode == PromptMode.SHELL:
-                        await self._run_shell_command(user_input.command)
-                        continue
+                                if user_input.mode == PromptMode.SHELL:
+                                    await self._run_shell_command(user_input.command)
+                                    continue
 
-                    if user_input.command.startswith("/"):
-                        logger.debug("Running meta command: {command}", command=user_input.command)
-                        await self._run_meta_command(user_input.command[1:])
-                        continue
+                                if user_input.command.startswith("/"):
+                                    logger.debug(
+                                        "Running meta command: {command}", command=user_input.command
+                                    )
+                                    await self._run_meta_command(user_input.command[1:])
+                                    continue
 
-                    logger.info(
-                        "Queue agent command: {command} with thinking {thinking}",
-                        command=user_input.content,
-                        thinking="on" if user_input.thinking else "off",
-                    )
-                    self._enqueue_agent_command(user_input)
+                                logger.info(
+                                    "Queue agent command: {command} with thinking {thinking}",
+                                    command=user_input.content,
+                                    thinking="on" if user_input.thinking else "off",
+                                )
+                                self._enqueue_agent_command(user_input)
+                    finally:
+                        manager.set_live_updater(None)
         finally:
             await manager.shutdown()
             self._task_manager = None
@@ -347,13 +379,9 @@ class ShellApp:
         toast("checking for updates...", topic="update", duration=2.0)
         result = await do_update(print=False, check_only=True)
         if result == UpdateResult.UPDATE_AVAILABLE:
-            while True:
-                toast(
-                    "new version found, run `uv tool upgrade kimi-cli` to upgrade",
-                    topic="update",
-                    duration=30.0,
-                )
-                await asyncio.sleep(60.0)
+            console.print(
+                "[yellow]New version available. Run `[bold]uv tool upgrade kimi-cli[/bold]` to upgrade.[/yellow]"
+            )
         elif result == UpdateResult.UPDATED:
             toast("auto updated, restart to use the new version", topic="update", duration=5.0)
 
