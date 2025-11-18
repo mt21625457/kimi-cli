@@ -21,10 +21,12 @@ def _transcript_lines(output: str) -> list[str]:
     return output.rstrip("\n").splitlines()
 
 
-def _assert_header(lines: list[str], command: str, *, scan: bool = False) -> None:
+def _assert_header(
+    lines: list[str], command: str, *, annotations: list[str] | None = None
+) -> None:
     expected = f"• Ran {command}"
-    if scan:
-        expected += " (scan)"
+    if annotations:
+        expected += " (" + ", ".join(annotations) + ")"
     assert lines[0] == expected
 
 
@@ -101,9 +103,14 @@ async def test_multiple_pipes(bash_tool: Bash):
     result = await bash_tool(Params(command="echo -e '1\\n2\\n3' | grep '2' | wc -l"))
     assert isinstance(result, ToolOk)
     lines = _transcript_lines(result.output)
-    _assert_header(lines, "echo -e '1\\n2\\n3' | grep '2' | wc -l")
+    _assert_header(
+        lines,
+        "echo -e '1\\n2\\n3' | rg '2' | wc -l",
+        annotations=["auto-rewritten"],
+    )
+    assert lines[1] == "  │ original: echo -e '1\\n2\\n3' | grep '2' | wc -l"
     assert "1" in "".join(lines[1:-1])
-    assert lines[-1] == "  └ (exit 0)"
+    assert "disable via cli_output.replace_grep_with_rg" in lines[-1]
 
 
 @pytest.mark.asyncio
@@ -237,5 +244,61 @@ async def test_scan_annotation(config: Config, approval):
 
     assert isinstance(result, ToolOk)
     lines = _transcript_lines(result.output)
-    _assert_header(lines, "echo hello", scan=True)
+    _assert_header(lines, "echo hello", annotations=["scan"])
     assert _body_contains(lines, "hello")
+
+
+@pytest.mark.asyncio
+async def test_grep_rewrite_simple(bash_tool: Bash):
+    result = await bash_tool(Params(command="printf 'TODO\\n' | grep -n TODO"))
+    assert isinstance(result, ToolOk)
+    lines = _transcript_lines(result.output)
+    _assert_header(
+        lines,
+        "printf 'TODO\\n' | rg --line-number TODO",
+        annotations=["auto-rewritten"],
+    )
+    assert lines[1] == "  │ original: printf 'TODO\\n' | grep -n TODO"
+    assert "disable via cli_output.replace_grep_with_rg" in lines[-1]
+
+
+@pytest.mark.asyncio
+async def test_grep_rewrite_toggle(config: Config, approval):
+    config.cli_output.replace_grep_with_rg = False
+    with tool_call_context("Bash"):
+        bash_tool = Bash(approval, config)
+        result = await bash_tool(Params(command="grep -n TODO <<< 'TODO'"))
+
+    assert isinstance(result, ToolOk)
+    lines = _transcript_lines(result.output)
+    _assert_header(lines, "grep -n TODO <<< 'TODO'")
+    assert all("auto-rewritten" not in line for line in lines)
+
+
+@pytest.mark.asyncio
+async def test_grep_rewrite_warning_line(bash_tool: Bash, temp_work_dir: Path):
+    sample = temp_work_dir / "sample.txt"
+    sample.write_text("hello\n""world\n")
+    cmd = f"grep -o hello {sample}"
+    result = await bash_tool(Params(command=cmd))
+    assert isinstance(result, ToolOk)
+    lines = _transcript_lines(result.output)
+    assert any("rewrite skipped:" in line for line in lines)
+
+
+@pytest.mark.asyncio
+async def test_grep_rewrite_skips_non_gnu(monkeypatch, bash_tool: Bash, temp_work_dir: Path):
+    async def _fake_supported(cmd: str) -> bool:  # pragma: no cover - helper
+        return False
+
+    monkeypatch.setattr(
+        "kimi_cli.tools.bash.rg_rewrite.ensure_supported_grep_binary",
+        _fake_supported,
+    )
+    sample = temp_work_dir / "sample.txt"
+    sample.write_text("foo\n")
+    cmd = f"grep foo {sample}"
+    result = await bash_tool(Params(command=cmd))
+    assert isinstance(result, ToolOk)
+    lines = _transcript_lines(result.output)
+    assert any("non-GNU" in line for line in lines)

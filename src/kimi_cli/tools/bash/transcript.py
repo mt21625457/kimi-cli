@@ -54,15 +54,23 @@ def format_transcript(
     collector: CommandOutputCollector,
     *,
     exit_code: int | None,
-    is_scan: bool,
+    annotations: list[str] | None = None,
+    prologue_lines: list[str] | None = None,
+    footer_hint: str | None = None,
     timeout: int | None = None,
 ) -> str:
     """Format a command transcript block."""
     lines: list[str] = []
     header = f"• Ran {command}"
-    if is_scan:
-        header += " (scan)"
+    if annotations:
+        normalized = [ann for ann in annotations if ann]
+        if normalized:
+            header += " (" + ", ".join(normalized) + ")"
     lines.append(header)
+
+    if prologue_lines:
+        for line in prologue_lines:
+            lines.append(f"  │ {line}")
 
     for preview_line in collector.preview_lines:
         if preview_line:
@@ -89,5 +97,8 @@ def format_transcript(
     if collector.is_truncated and "output truncated" not in footer_parts:
         footer_parts.append("output truncated")
 
-    lines.append(f"  └ ({', '.join(footer_parts)})")
+    footer_text = ", ".join(footer_parts)
+    if footer_hint:
+        footer_text = f"{footer_text}; {footer_hint}"
+    lines.append(f"  └ ({footer_text})")
     return "\n".join(lines) + "\n"

@@ -188,9 +188,10 @@ def glob_tool(builtin_args: BuiltinSystemPromptArgs) -> Glob:
 
 
 @pytest.fixture
-def grep_tool() -> Grep:
+def grep_tool(config: Config, approval: Approval) -> Generator[Grep]:
     """Create a Grep tool instance."""
-    return Grep()
+    with tool_call_context("Grep"):
+        yield Grep(config, approval)
 
 
 @pytest.fixture

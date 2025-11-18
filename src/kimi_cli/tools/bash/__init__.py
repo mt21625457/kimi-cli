@@ -1,4 +1,5 @@
 import asyncio
+import os
 import platform
 from collections.abc import Callable
 from pathlib import Path
@@ -8,7 +9,9 @@ from kosong.tooling import CallableTool2, ToolReturnType
 from pydantic import BaseModel, Field
 
 from kimi_cli.config import Config
+from kimi_cli.share import get_share_dir
 from kimi_cli.soul.approval import Approval
+from kimi_cli.tools.bash.rg_rewrite import rewrite_command_if_needed
 from kimi_cli.tools.bash.transcript import CommandOutputCollector, format_transcript
 from kimi_cli.tools.utils import ToolRejectedError, ToolResultBuilder, load_desc
 
@@ -47,14 +50,22 @@ class Bash(CallableTool2[Params]):
         builder = ToolResultBuilder()
         collector = CommandOutputCollector()
 
+        rewrite_result = await rewrite_command_if_needed(params.command, self._config, self._approval)
         if not await self._approval.request(
             self.name,
             "run shell command",
-            f"Run command `{params.command}`",
+            f"Run command `{rewrite_result.command_to_run}`",
         ):
             return ToolRejectedError()
 
-        is_scan_command = self._is_scan_command(params.command)
+        is_scan_command = self._is_scan_command(rewrite_result.command_to_run)
+        annotations: list[str] = []
+        if rewrite_result.annotation:
+            annotations.append(rewrite_result.annotation)
+        if is_scan_command:
+            annotations.append("scan")
+
+        env = _build_env_with_share_bin()
 
         def _append_line(line: bytes):
             line_str = line.decode(encoding="utf-8", errors="replace").rstrip("\n")
@@ -69,14 +80,20 @@ class Bash(CallableTool2[Params]):
 
         try:
             exitcode = await _stream_subprocess(
-                params.command, stdout_cb, stderr_cb, params.timeout
+                rewrite_result.command_to_run,
+                stdout_cb,
+                stderr_cb,
+                params.timeout,
+                env=env,
             )
 
             transcript = format_transcript(
-                params.command,
+                rewrite_result.display_command,
                 collector,
                 exit_code=exitcode,
-                is_scan=is_scan_command,
+                annotations=annotations,
+                prologue_lines=rewrite_result.prologue_lines,
+                footer_hint=rewrite_result.footer_hint,
             )
             builder.write(transcript)
             if exitcode == 0:
@@ -88,10 +105,12 @@ class Bash(CallableTool2[Params]):
                 )
         except TimeoutError:
             transcript = format_transcript(
-                params.command,
+                rewrite_result.display_command,
                 collector,
                 exit_code=None,
-                is_scan=is_scan_command,
+                annotations=annotations,
+                prologue_lines=rewrite_result.prologue_lines,
+                footer_hint=rewrite_result.footer_hint,
                 timeout=params.timeout,
             )
             builder.write(transcript)
@@ -122,6 +141,7 @@ async def _stream_subprocess(
     stdout_cb: Callable[[bytes], None],
     stderr_cb: Callable[[bytes], None],
     timeout: int,
+    env: dict[str, str] | None = None,
 ) -> int:
     async def _read_stream(stream: asyncio.StreamReader, cb: Callable[[bytes], None]):
         while True:
@@ -133,7 +153,10 @@ async def _stream_subprocess(
 
     # FIXME: if the event loop is cancelled, an exception may be raised when the process finishes
     process = await asyncio.create_subprocess_shell(
-        command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        command,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        env=env,
     )
 
     assert process.stdout is not None, "stdout is None"
@@ -151,3 +174,13 @@ async def _stream_subprocess(
     except TimeoutError:
         process.kill()
         raise
+
+
+def _build_env_with_share_bin() -> dict[str, str]:
+    env = os.environ.copy()
+    share_bin = get_share_dir() / "bin"
+    share_path = str(share_bin)
+    current_path = env.get("PATH", "")
+    if share_path and share_path not in current_path.split(os.pathsep):
+        env["PATH"] = f"{share_path}{os.pathsep}{current_path}" if current_path else share_path
+    return env

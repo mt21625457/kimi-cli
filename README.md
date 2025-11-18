@@ -84,10 +84,22 @@ security-focused operations are easy to spot. Customize the patterns with, e.g.:
 ```json
 {
   "cli_output": {
-    "scan_tool_patterns": ["scan", "openspec validate", "yarn audit"]
+    "scan_tool_patterns": ["scan", "openspec validate", "yarn audit"],
+    "replace_grep_with_rg": true,
+    "auto_install_ripgrep": false
   }
 }
 ```
+
+When `replace_grep_with_rg` is enabled, the Bash tool rewrites safe `grep`/`egrep`/`fgrep`
+segments into ripgrep (`rg`) so pipelines finish faster and produce consistent logs. The transcript
+shows the rewritten command with an `(auto-rewritten)` tag plus the original command on the next
+line for auditing. Set the option to `false` when you need the command to run exactly as typed.
+
+When ripgrep is missing, the CLI searches `~/.kimi/bin`, bundled deps, then your `PATH`; if it is
+still missing, it downloads the official archive from the Kimi CDN, verifies the SHA-256 checksum,
+and installs it into `~/.kimi/bin`. Users are prompted unless `auto_install_ripgrep` is `true`. On
+failure, the CLI prints manual installation instructions so you can install `rg` yourself.
 
 ### Zsh integration
 

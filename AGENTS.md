@@ -171,7 +171,8 @@ Selected ruff rules:
 
 ### Available Tools
 
-- **Bash**: Execute shell commands. Outputs are rendered as `• Ran <cmd>` transcripts with `│`-prefixed previews and `└` footers; scan command tags are driven by `cli_output.scan_tool_patterns` in `~/.kimi/config.json`.
+- **Bash**: Execute shell commands. Outputs are rendered as `• Ran <cmd>` transcripts with `│`-prefixed previews and `└` footers; scan command tags are driven by `cli_output.scan_tool_patterns` in `~/.kimi/config.json`. Safe `grep`/`egrep`/`fgrep` segments are rewritten to ripgrep (`rg`) when `cli_output.replace_grep_with_rg` is `true`, and the transcript always includes both the rewritten command (`(auto-rewritten)`) and the original command (`│ original: ...`). Set the option to `false` when you need literal `grep` semantics.
+- Ripgrep binaries are discovered from `~/.kimi/bin`, bundled deps, then `PATH`. If none are found, the CLI downloads a signed archive from the Kimi CDN, verifies SHA-256, and installs it into `~/.kimi/bin`. Users are prompted unless `cli_output.auto_install_ripgrep` is `true`; on failure, the CLI prints manual installation guidance.
 - **ReadFile**: Read file contents with line limits
 - **WriteFile**: Write content to files
 - **Glob**: File pattern matching

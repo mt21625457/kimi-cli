@@ -43,7 +43,9 @@ def test_default_config_dump():
       "scan",
       "rg --files",
       "openspec validate"
-    ]
+    ],
+    "replace_grep_with_rg": true,
+    "auto_install_ripgrep": false
   },
   "shell": {
     "task_banner": {

@@ -88,6 +88,19 @@ class CLIOutputConfig(BaseModel):
         default_factory=_default_scan_tool_patterns,
         description="Command prefixes that should be annotated as scan tools.",
     )
+    replace_grep_with_rg: bool = Field(
+        default=True,
+        description=(
+            "Whether Bash commands containing GNU grep should be rewritten to ripgrep "
+            "for better performance."
+        ),
+    )
+    auto_install_ripgrep: bool = Field(
+        default=False,
+        description=(
+            "Automatically install ripgrep without prompting when it is missing."
+        ),
+    )
 
 
 DEFAULT_VISIBLE_TASK_SLOTS = 4
