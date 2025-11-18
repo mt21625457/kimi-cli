@@ -292,7 +292,6 @@ def kimi(
         instance = await KimiCLI.create(
             session,
             yolo=yolo or (ui == "print"),  # print mode implies yolo
-            stream=ui != "print",  # use non-streaming mode only for print UI
             mcp_configs=mcp_configs,
             model_name=model_name,
             thinking=thinking_mode,
@@ -352,4 +351,7 @@ def kimi(
 
 
 if __name__ == "__main__":
-    cli()
+    if "kimi_cli.cli" not in sys.modules:
+        sys.modules["kimi_cli.cli"] = sys.modules[__name__]
+
+    sys.exit(cli())
