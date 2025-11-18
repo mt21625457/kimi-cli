@@ -17,6 +17,7 @@ from hashlib import md5
 from io import BytesIO
 from pathlib import Path
 from typing import override
+import weakref
 
 from kosong.message import ContentPart, ImageURLPart, TextPart
 from PIL import Image, ImageGrab
@@ -57,11 +58,11 @@ PROMPT_SYMBOL_THINKING = "💫"
 _PROMPT_STYLE = Style.from_dict(
     {
         # `noreverse` prevents prompt_toolkit's default reverse video background.
-        "bottom-toolbar": "noreverse bg:default fg:#7f7f7f",
-        "toolbar.status": "fg:#8d8d8d bold",
-        "toolbar.mode": "fg:#9a9a9a",
-        "toolbar.shortcut": "fg:#6e6e6e",
-        "toolbar.toast": "fg:#bba173",
+        "bottom-toolbar": "noreverse bg:default fg:#7a7a7a",
+        "toolbar.status": "fg:#8a8a8a",
+        "toolbar.mode": "fg:#9c9c9c",
+        "toolbar.shortcut": "fg:#6c6c6c",
+        "toolbar.toast": "fg:#b59a6f",
     }
 )
 
@@ -445,19 +446,12 @@ class _ToastEntry:
 _toast_queue = deque[_ToastEntry]()
 """The queue of toasts to show, including the one currently being shown (the first one)."""
 
+_ACTIVE_PROMPTS: weakref.WeakSet["CustomPromptSession"] = weakref.WeakSet()
 
-def _tick_toasts(delta: float) -> None:
-    remaining = delta
-    if not _toast_queue or remaining <= 0:
-        return
 
-    while _toast_queue and remaining > 0:
-        current = _toast_queue[0]
-        current.duration -= remaining
-        if current.duration > 0:
-            break
-        remaining = -current.duration
-        _toast_queue.popleft()
+def _notify_toolbar_change() -> None:
+    for prompt in list(_ACTIVE_PROMPTS):
+        prompt._request_toolbar_render()
 
 
 def toast(
@@ -477,6 +471,23 @@ def toast(
         _toast_queue.appendleft(entry)
     else:
         _toast_queue.append(entry)
+    _notify_toolbar_change()
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+    if loop is not None:
+        loop.create_task(_expire_toast(entry, duration))
+
+
+async def _expire_toast(entry: _ToastEntry, duration: float) -> None:
+    try:
+        await asyncio.sleep(duration)
+    except asyncio.CancelledError:
+        return
+    with contextlib.suppress(ValueError):
+        _toast_queue.remove(entry)
+    _notify_toolbar_change()
 
 
 def _current_toast() -> _ToastEntry | None:
@@ -522,6 +533,11 @@ class CustomPromptSession:
         """Mapping from attachment id to ContentPart."""
         self._toolbar_signature: _ToolbarSignature | None = None
         self._toolbar_columns: int | None = None
+        self._toolbar_event: asyncio.Event | None = None
+        self._toolbar_refresh_task: asyncio.Task | None = None
+        self._status_poll_task: asyncio.Task | None = None
+        self._cached_context_usage: float | None = None
+        self._cached_note_text: str | None = None
 
         history_entries = _load_history_entries(self._history_file)
         history = InMemoryHistory()
@@ -626,15 +642,15 @@ class CustomPromptSession:
             if buffer.complete_while_typing():
                 buffer.start_completion()
 
-        self._status_refresh_task: asyncio.Task | None = None
-
     def _render_message(self) -> FormattedText:
-        fragments: list[tuple[str, str]] = []
-        symbol = PROMPT_SYMBOL if self._mode == PromptMode.AGENT else PROMPT_SYMBOL_SHELL
-        if self._mode == PromptMode.AGENT and self._thinking:
-            symbol = PROMPT_SYMBOL_THINKING
-        fragments.append(("bold", f"{getpass.getuser()}{symbol} "))
-        return FormattedText(fragments)
+        symbol = (
+            PROMPT_SYMBOL_THINKING
+            if self._mode == PromptMode.AGENT and self._thinking
+            else PROMPT_SYMBOL
+            if self._mode == PromptMode.AGENT
+            else PROMPT_SYMBOL_SHELL
+        )
+        return FormattedText([("bold", f"{getpass.getuser()}{symbol} ")])
 
     def _apply_mode(self, event: KeyPressEvent | None = None) -> None:
         # Apply mode to the active buffer (not the PromptSession itself)
@@ -654,50 +670,27 @@ class CustomPromptSession:
             if buff is not None:
                 buff.completer = self._agent_mode_completer
 
+        return self
+
     def __enter__(self) -> CustomPromptSession:
-        if self._status_refresh_task is not None and not self._status_refresh_task.done():
+        if self._toolbar_refresh_task is not None and not self._toolbar_refresh_task.done():
             return self
-
-        async def _refresh(interval: float) -> None:
-            last_tick = time.monotonic()
-            try:
-                while True:
-                    app = get_app_or_none()
-                    if app is not None:
-                        now = time.monotonic()
-                        _tick_toasts(now - last_tick)
-                        last_tick = now
-                        columns = app.output.get_size().columns
-                        signature = self._snapshot_toolbar_signature()
-                        if (
-                            signature != self._toolbar_signature
-                            or columns != self._toolbar_columns
-                        ):
-                            self._toolbar_signature = signature
-                            self._toolbar_columns = columns
-                            app.invalidate()
-                    else:
-                        last_tick = time.monotonic()
-
-                    try:
-                        asyncio.get_running_loop()
-                    except RuntimeError:
-                        logger.warning("No running loop found, exiting status refresh task")
-                        self._status_refresh_task = None
-                        break
-
-                    await asyncio.sleep(interval)
-            except asyncio.CancelledError:
-                # graceful exit
-                pass
-
-        self._status_refresh_task = asyncio.create_task(_refresh(_REFRESH_INTERVAL))
+        self._toolbar_event = asyncio.Event()
+        self._toolbar_refresh_task = asyncio.create_task(self._toolbar_refresh_loop())
+        self._status_poll_task = asyncio.create_task(self._status_poll_loop(_REFRESH_INTERVAL))
+        _ACTIVE_PROMPTS.add(self)
+        self._request_toolbar_render()
         return self
 
     def __exit__(self, exc_type, exc_value, traceback) -> None:
-        if self._status_refresh_task is not None and not self._status_refresh_task.done():
-            self._status_refresh_task.cancel()
-        self._status_refresh_task = None
+        if self._status_poll_task is not None and not self._status_poll_task.done():
+            self._status_poll_task.cancel()
+        if self._toolbar_refresh_task is not None and not self._toolbar_refresh_task.done():
+            self._toolbar_refresh_task.cancel()
+        self._status_poll_task = None
+        self._toolbar_refresh_task = None
+        self._toolbar_event = None
+        _ACTIVE_PROMPTS.discard(self)
         self._attachment_parts.clear()
 
     def invalidate(self) -> None:
@@ -707,6 +700,51 @@ class CustomPromptSession:
             app = get_app_or_none()
         if app is not None:
             app.invalidate()
+        self._request_toolbar_render()
+
+    def _request_toolbar_render(self) -> None:
+        if self._toolbar_event is None:
+            return
+        self._toolbar_event.set()
+
+    async def _toolbar_refresh_loop(self) -> None:
+        assert self._toolbar_event is not None
+        try:
+            while True:
+                await self._toolbar_event.wait()
+                self._toolbar_event.clear()
+                app = get_app_or_none()
+                if app is None:
+                    continue
+                columns = app.output.get_size().columns
+                signature = self._snapshot_toolbar_signature()
+                if (
+                    signature != self._toolbar_signature
+                    or columns != self._toolbar_columns
+                ):
+                    self._toolbar_signature = signature
+                    self._toolbar_columns = columns
+                    app.invalidate()
+        except asyncio.CancelledError:
+            pass
+
+    async def _status_poll_loop(self, interval: float) -> None:
+        try:
+            while True:
+                await asyncio.sleep(interval)
+                status = self._status_provider()
+                note = self._status_note_provider()
+                new_context = round(max(0.0, min(status.context_usage, 1.0)), 4)
+                new_note = note.strip() if isinstance(note, str) else (note or "")
+                if (
+                    self._cached_context_usage != new_context
+                    or self._cached_note_text != new_note
+                ):
+                    self._cached_context_usage = new_context
+                    self._cached_note_text = new_note
+                    self._request_toolbar_render()
+        except asyncio.CancelledError:
+            pass
 
     def _try_paste_image(self, event: KeyPressEvent) -> bool:
         """Try to paste an image from the clipboard. Return True if successful."""
