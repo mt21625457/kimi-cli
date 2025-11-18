@@ -65,6 +65,8 @@ type ControlFlowEvent = StepBegin | StepInterrupted | CompactionBegin | Compacti
 """Any control flow event."""
 type Event = ControlFlowEvent | ContentPart | ToolCall | ToolCallPart | ToolResult | SubagentEvent
 """Any event, including control flow and content/tooling events."""
+type WireMessage = Event | ApprovalRequest
+"""Any message that can flow across the wire."""
 
 
 class ApprovalResponse(Enum):
