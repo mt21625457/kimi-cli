@@ -1,32 +1,26 @@
-# Proposal: Network & Cache Efficiency
+# Proposal: 网络与缓存效率优化
 
-## Change ID
+## 变更编号
 improve-network-cache
 
-## Summary
-Rework outbound HTTP usage so tools share persistent connection pools and introduce layered caching
-for repeatable lookups (search results, file metadata). This reduces the 1.6s baseline delay on
-search-oriented commands and cuts bandwidth usage for repeated queries.
+## 摘要
+重构对外 HTTP 的使用方式，使所有工具共享持久化连接池，并引入分层缓存机制用于可重复查询（搜索结果、文件元数据）。这样可以减少面向搜索的命令高达 1.6 秒的基准延迟，并降低重复查询的带宽消耗。
 
-## Why
-- Each Bash/search tool invocation currently spins up a new HTTP client, paying TLS setup costs and
-  wasting CPU time.
-- Lack of caching means repeated searches or metadata fetches hit third-party APIs even when the
-  inputs have not changed within minutes.
-- Users experience sluggish agent responses when subagents queue multiple web requests back-to-back.
+## 背景与原因
+- 目前每次调用 Bash/search 工具都会创建新的 HTTP 客户端，产生 TLS 握手开销并浪费 CPU 时间
+- 缺乏缓存机制意味着即使输入在几分钟内没有变化，重复搜索或元数据获取仍会调用第三方 API
+- 当子代理连续发送多个网络请求时，用户会感受到缓慢的代理响应
 
-## What Changes
-- Provide a singleton async HTTP client (per base URL) with keep-alive and bounded connection pools,
-  plus automatic retries and timeouts.
-- Layer in-memory LRU and optional disk caches for read-mostly APIs (Moonshot search, file listing,
-  docs fetch) with short TTLs to avoid stale data.
-- Expose instrumentation so developers can inspect cache hit rates and pool utilization.
+## 涉及变更
+- 提供单例异步 HTTP 客户端（每个基础 URL 一个），具备 keep-alive 和有限连接池，加上自动重试和超时机制
+- 为读取为主的 API（Moonshot 搜索、文件列表、文档获取）添加内存 LRU 缓存和可选的磁盘缓存，使用较短的 TTL 避免提供过时数据
+- 提供观测能力，让开发者可以检查缓存命中率和连接池利用率
 
-## Impact
-- Expect 200–400 ms savings per external request thanks to connection reuse.
-- Backend APIs experience fewer redundant requests, lowering rate-limit pressure.
-- Slight increase in complexity due to cache invalidation and telemetry plumbing.
+## 影响预期
+- 每个外部请求预计节省 200-400 毫秒，得益于连接复用
+- 后端 API 的重复请求减少，降低限流压力
+- 因缓存失效和监控埋点，代码复杂度略有增加
 
-## Open Questions
-1. Should cache TTLs be user-configurable per tool, or governed by a single global policy?
-2. Do we need opt-out switches for users on sensitive networks who prefer no caching?
+## 待讨论问题
+1. 缓存的 TTL 应该按工具可配置，还是由单一全局策略管理？
+2. 需不需要为在敏感网络上、偏好不缓存的用户提供退出选项？

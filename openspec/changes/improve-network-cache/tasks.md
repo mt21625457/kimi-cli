@@ -1,13 +1,8 @@
-## 1. Implementation
-- [ ] 1.1 Introduce a shared async HTTP client factory that manages keep-alive pools, retry/backoff,
-      and TLS settings for all outbound requests.
-- [ ] 1.2 Implement two-tier caching (in-memory LRU + optional disk cache) for high-churn read
-      operations, with configurable TTLs and cache keys derived from request params.
-- [ ] 1.3 Add instrumentation hooks (logging or metrics) to report connection pool usage, cache hits,
-      and fallbacks when caches are bypassed.
+## 1. 实现任务
+- [ ] 1.1 引入共享异步 HTTP 客户端工厂，管理 keep-alive 连接池、重试/退避策略，以及所有出站请求的 TLS 设置
+- [ ] 1.2 实现两级缓存（内存 LRU + 可选磁盘缓存），用于高频读取操作，具备可配置 TTL 和基于请求参数生成的缓存键
+- [ ] 1.3 添加监控钩子（日志或指标），报告连接池使用情况、缓存命中，以及缓存被绕过时的降级情况
 
-## 2. Validation
-- [ ] 2.1 Add integration tests or mocks verifying that repeated requests reuse the same client,
-      respect TTLs, and serve cached data when appropriate.
-- [ ] 2.2 Document new configuration flags (pool size, TTL, cache directory) and run `make check`
-      / `make test` to confirm the changes pass CI gates.
+## 2. 验证任务
+- [ ] 2.1 添加集成测试或模拟，验证重复请求确实复用同一客户端、遵守 TTL，并在适当时机提供缓存数据
+- [ ] 2.2 文档化新增配置项（连接池大小、TTL、缓存目录），并运行 `make check` / `make test` 确认变更通过 CI 门禁

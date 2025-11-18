@@ -1,40 +1,37 @@
-## ADDED Requirements
-### Requirement: Shared HTTP Connection Pools
-All networked tools MUST obtain HTTP clients from a shared pool that maintains persistent
-connections, enforces per-host limits, and retries transient failures.
+## 新增需求
 
-#### Scenario: Reuse existing connection
-- **GIVEN** the agent issues two search requests to the same base URL within 60 seconds
-- **WHEN** the second request is dispatched
-- **THEN** it reuses an existing keep-alive connection from the pool instead of creating a new TCP
-  session
-- **AND** pool limits prevent unbounded concurrent connections.
+### 需求：共享 HTTP 连接池
+所有网络工具必须从共享连接池获取 HTTP 客户端，该连接池维护持久连接、强制执行每个主机限制，并对瞬时故障进行重试。
 
-### Requirement: Layered Response Caching
-Frequently repeated read operations (search results, file metadata, docs fetches) MUST leverage an
-in-memory LRU cache backed by an optional on-disk cache with configurable TTLs.
+#### 场景：复用已有连接
+- **假设** 代理在 60 秒内对同一基础 URL 发出两次搜索请求
+- **当** 第二次请求被发出时
+- **那么** 它复用连接池中已有的 keep-alive 连接，而不是创建新的 TCP 会话
+- **且** 连接池限制防止无限制的并发连接
 
-#### Scenario: Cache hit short-circuits remote call
-- **GIVEN** a search query identical to one executed within the last N minutes (TTL)
-- **WHEN** the agent handles the query again
-- **THEN** it serves the response from cache immediately
-- **AND** logs note the cache hit.
+### 需求：分层响应缓存
+频繁重复的读取操作（搜索结果、文件元数据、文档获取）必须使用内存 LRU 缓存，并由可选的磁盘缓存支持，且具备可配置的 TTL。
 
-#### Scenario: TTL expiry forces refresh
-- **GIVEN** a cached entry whose TTL has elapsed
-- **WHEN** the same request is repeated
-- **THEN** the system bypasses cache, re-fetches fresh data, and stores it again.
+#### 场景：缓存命中直接返回
+- **假设** 搜索查询与最近 N 分钟内（TTL 内）执行过的查询完全相同
+- **当** 代理再次收到该查询时
+- **那么** 直接从缓存立即返回响应
+- **且** 日志中记录缓存命中
 
-### Requirement: Instrumentation & Opt-Out Controls
-The system MUST expose diagnostics about cache hit rates and pool usage, and allow users to disable
-caching or pooling via configuration.
+#### 场景：TTL 过期强制刷新
+- **假设** 缓存条目已超出 TTL
+- **当** 再次收到相同请求时
+- **那么** 系统绕过缓存，重新获取数据，并再次存储
 
-#### Scenario: User disables caching
-- **GIVEN** a user sets `caching.enabled = false`
-- **WHEN** the agent handles requests
-- **THEN** it skips both in-memory and disk caches while still honoring connection pooling.
+### 需求：监控 & 退出控制
+系统必须暴露缓存命中率和连接池使用的诊断信息，并允许用户通过配置禁用缓存或连接池。
 
-#### Scenario: Pool metrics surfaced
-- **GIVEN** verbose logging is enabled
-- **WHEN** the connection pool scales up or reuses connections
-- **THEN** logs include debug entries summarizing pool size, idle connections, and reuse counts.
+#### 场景：用户禁用缓存
+- **假设** 用户设置 `caching.enabled = false`
+- **当** 代理处理请求时
+- **那么** 跳过内存和磁盘缓存，但仍使用连接池
+
+#### 场景：连接池指标展示
+- **假设** 启用了详细日志
+- **当** 连接池扩容或复用连接时
+- **那么** 日志包含连接池大小、空闲连接和复用次数的调试信息
