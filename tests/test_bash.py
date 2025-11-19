@@ -103,10 +103,13 @@ async def test_multiple_pipes(bash_tool: Bash):
     result = await bash_tool(Params(command="echo -e '1\\n2\\n3' | grep '2' | wc -l"))
     assert isinstance(result, ToolOk)
     lines = _transcript_lines(result.output)
-    _assert_header(
-        lines,
+    expected_variants = [
         "echo -e '1\\n2\\n3' | rg '2' | wc -l",
-        annotations=["auto-rewritten"],
+        "echo -e '1\\n2\\n3' | rg 2 | wc -l",
+    ]
+    assert any(
+        lines[0] == f"• Ran {variant} (auto-rewritten)"
+        for variant in expected_variants
     )
     assert lines[1] == "  │ original: echo -e '1\\n2\\n3' | grep '2' | wc -l"
     assert "1" in "".join(lines[1:-1])

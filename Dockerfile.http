@@ -1,0 +1,19 @@
+FROM python:3.13-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
+
+WORKDIR /app
+
+COPY pyproject.toml uv.lock README.md ./
+COPY src ./src
+COPY openspec ./openspec
+COPY tests ./tests
+COPY tests_ai ./tests_ai
+
+RUN pip install --upgrade pip && \
+    pip install .
+
+EXPOSE 9000
+
+CMD ["python", "-m", "kimi_http.server", "--host", "0.0.0.0", "--port", "9000"]

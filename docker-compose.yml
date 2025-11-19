@@ -1,0 +1,15 @@
+version: "3.9"
+
+services:
+  kimi-http:
+    build:
+      context: .
+      dockerfile: Dockerfile.http
+    environment:
+      KIMI_BASE_URL: ${KIMI_BASE_URL:?Set KIMI_BASE_URL before running docker-compose}
+      KIMI_API_KEY: ${KIMI_API_KEY:?Set KIMI_API_KEY before running docker-compose}
+      KIMI_MODEL_NAME: ${KIMI_MODEL_NAME:-kimi-for-coding}
+    ports:
+      - "${KIMI_HTTP_PORT:-9000}:9000"
+    command: ["python", "-m", "kimi_http.server", "--host", "0.0.0.0", "--port", "9000"]
+    restart: unless-stopped

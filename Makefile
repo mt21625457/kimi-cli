@@ -29,6 +29,10 @@ test: ## Run the test suite with pytest.
 build: ## Build the standalone executable with PyInstaller.
 	uv run pyinstaller kimi.spec
 
+.PHONY: build_http
+build_http: ## Build the HTTP server executable with PyInstaller.
+	uv run pyinstaller kimi_http.spec
+
 .PHONY: ai-test
 ai-test: ## Run the test suite with Kimi CLI.
 	uv run tests_ai/scripts/run.py tests_ai

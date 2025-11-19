@@ -170,6 +170,62 @@ Run `kimi` with `--mcp-config-file` option to connect to the specified MCP serve
 kimi --mcp-config-file /path/to/mcp.json
 ```
 
+## HTTP 服务
+
+`src/kimi_http/` 提供了一个基于 Quart + Hypercorn 的 HTTP/2 服务入口，所有 API 统一挂在 `/api/v1` 前缀下，并以 NDJSON 流式输出事件。
+
+### 启动服务
+
+```sh
+python -m kimi_http.server --host 0.0.0.0 --port 9000
+```
+
+主要路由：
+
+- `GET /api/v1/health`：返回 `{"status": "ok", "version": "..."}`。
+- `POST /api/v1/runs`：请求体示例：
+  ```json
+  {
+    "work_dir": "/workspace/project",
+    "command": "scan the repo",
+    "env": {
+      "KIMI_BASE_URL": "https://api.moonshot.cn/v1",
+      "KIMI_API_KEY": "sk-...",
+      "KIMI_MODEL_NAME": "kimi-for-coding"
+    },
+    "options": {
+      "yolo": true,
+      "thinking": false
+    }
+  }
+  ```
+  响应为 `application/x-ndjson`，每行都是一个事件（wire 事件、审批、完成状态等）。
+- `POST /api/v1/runs/<id>/cancel`：取消指定 run，并在流中返回 `cancelled` 状态。
+
+服务会为每个请求独立创建 `Session`、`Runtime`、`KimiSoul`，互不共享历史；审批默认自动通过。若需要 HTTP/2，可使用 `curl --http2` 或任意支持 HTTP/2 的客户端。
+
+### Docker Compose 部署
+
+仓库根目录提供了 `docker-compose.yml` 与 `Dockerfile.http`。准备好如下环境变量后即可运行：
+
+```sh
+export KIMI_BASE_URL="https://api.moonshot.cn/v1"
+export KIMI_API_KEY="sk-..."
+export KIMI_MODEL_NAME="kimi-for-coding"
+docker compose up --build
+```
+
+服务会监听 `KIMI_HTTP_PORT`（默认 9000），所有必要的 LLM 配置通过环境变量传入容器，镜像入口即 `python -m kimi_http.server`。
+
+### 打包独立二进制
+
+使用 PyInstaller 生成无需额外依赖的可执行文件：
+
+```sh
+make build_http
+./dist/kimi_http --host 0.0.0.0 --port 9000
+```
+
 ## Development
 
 To develop Kimi CLI, run:

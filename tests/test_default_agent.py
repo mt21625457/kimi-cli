@@ -213,6 +213,13 @@ The stdout and stderr streams are merged, previewed line-by-line, and the footer
 status plus whether the output was truncated or missing. Commands whose prefixes match
 `cli_output.scan_tool_patterns` in `~/.kimi/config.json` are annotated with `(scan)`.
 
+When `cli_output.replace_grep_with_rg` is enabled (default), safe `grep`/`egrep`/`fgrep` segments
+inside the command are rewritten to ripgrep (`rg`) for better performance. Rewrites add an
+`(auto-rewritten)` annotation plus a `│ original: …` line so you can inspect the original command.
+Set the option to `false` when you must run `grep` exactly as written. Ripgrep binaries are located
+in `~/.kimi/bin`, bundled deps, and `$PATH`; if missing, the CLI downloads and verifies the
+appropriate build unless `cli_output.auto_install_ripgrep` is disabled.
+
 **Guidelines for safety and security:**
 - Each shell tool call will be executed in a fresh shell environment. The shell variables, current working directory changes, and the shell history is not preserved between calls.
 - The tool call will return after the command is finished. You shall not use this tool to execute an interactive command or a command that may run forever. For possibly long-running commands, you shall set `timeout` argument to a reasonable value.
@@ -347,8 +354,12 @@ Find files and directories using glob patterns. This tool supports standard glob
 A powerful search tool based-on ripgrep.
 
 **Tips:**
-- ALWAYS use Grep tool instead of running `grep` or `rg` command with Bash tool.
+- Prefer the Grep tool over invoking `grep` in the Bash tool. Bash will auto-rewrite simple
+  `grep`/`egrep`/`fgrep` pipelines to ripgrep (`rg`), but this tool already exposes idiomatic
+  ripgrep options and richer output modes.
 - Use the ripgrep pattern syntax, not grep syntax. E.g. you need to escape braces like `\\\\{` to search for `{`.
+- If `rg` is missing, the CLI can download and verify an official build into `~/.kimi/bin`. The
+  download requires approval unless `cli_output.auto_install_ripgrep` is `true`.
 """,
                 parameters={
                     "properties": {
