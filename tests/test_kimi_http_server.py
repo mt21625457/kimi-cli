@@ -61,3 +61,19 @@ async def test_cancel_endpoint(tmp_path):
         assert payload["status"] == "cancelling"
     finally:
         manager.remove(handle.id)
+
+
+@pytest.mark.asyncio
+async def test_run_endpoint_batch_mode(tmp_path):
+    app = create_app(run_executor=DummyExecutor())
+    client = app.test_client()
+
+    response = await client.post(
+        f"{API_PREFIX}/runs",
+        json={"command": "echo hi", "work_dir": str(tmp_path), "stream": False},
+    )
+    assert response.status_code == 200
+    payload = await response.get_json()
+    assert payload["run_id"]
+    assert payload["events"][0]["type"] == "run_started"
+    assert payload["events"][-1]["payload"]["status"] == "finished"

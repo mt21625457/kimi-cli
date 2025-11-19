@@ -23,6 +23,7 @@ class RunRequest(BaseModel):
     config_file: Path | None = None
     env: dict[str, str | Any] = Field(default_factory=dict)
     options: RunOptions = Field(default_factory=RunOptions)
+    stream: bool = Field(default=True)
 
     @field_validator("command")
     @classmethod

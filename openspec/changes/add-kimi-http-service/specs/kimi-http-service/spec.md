@@ -16,7 +16,7 @@ Kimi CLI MUST 在 `src/kimi_http/` 目录下提供独立的 HTTP 服务入口（
 - **Then** 响应 MUST 通过 HTTP/2 data frame/Chunked 方式逐条写出事件，不得在内存中缓冲到结束后一次性返回。
 
 ### Requirement: POST /runs SHALL 启动独立 Runtime 并流式输出
-HTTP 服务 MUST 暴露 `POST /api/v1/runs` 接口，接收 JSON（包含 `work_dir`、`command`、`agent_file`、`model_name` 以及可选 `env`/`options`），并为每个请求即时创建 Session + Runtime。响应 MUST 以 chunked/NDJSON 流方式返回 wire 事件，直至 run 完成或出错。
+HTTP 服务 MUST 暴露 `POST /api/v1/runs` 接口，接收 JSON（包含 `work_dir`、`command`、`agent_file`、`model_name` 以及可选 `env`/`options`），并为每个请求即时创建 Session + Runtime。响应默认输出 NDJSON 文本，按事件顺序逐行编码；即便采用“流式”模式，服务也 SHALL 在服务器端聚合事件后一次性返回，避免边写边推。（可选的 batch 模式则返回 JSON 数组。）
 
 #### Scenario: 请求触发独立执行
 - **Given** 客户端向 `/api/v1/runs` 发送 `{ "work_dir": "/tmp/app", "command": "list files" }`
@@ -29,6 +29,11 @@ HTTP 服务 MUST 暴露 `POST /api/v1/runs` 接口，接收 JSON（包含 `work_
 - **Given** 请求 payload 中提供 `env`: `{ "KIMI_BASE_URL": "https://foo", "KIMI_API_KEY": "sk-..." }` 以及 `model_name`
 - **When** Runtime 被创建
 - **Then** 服务 MUST 将这些值注入进 `augment_provider_with_env_vars` 同等逻辑中，以确保无需修改 `~/.kimi/config.json` 即可完成调用。
+
+#### Scenario: 非流式模式一次性返回
+- **Given** 客户端在请求体中设置 `"stream": false`
+- **When** 运行完成
+- **Then** 服务 MUST 聚合该 run 的所有事件并以单个 JSON 数组（或对象）返回，避免边生成边写；默认行为仍为流式输出。
 
 ### Requirement: 请求隔离与并行
 服务 MUST 能够同时处理多个 `/api/v1/runs` 请求，每个请求使用独立的 Session/Runtime/工作目录，不得共享上下文或互相阻塞；同时提供取消/超时的能力以便在 HTTP 层终止正在运行的代理。

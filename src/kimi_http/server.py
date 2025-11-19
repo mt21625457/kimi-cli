@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 from typing import Any, AsyncIterator
 
 from hypercorn.asyncio import serve
@@ -44,18 +45,19 @@ def create_app(run_executor: RunExecutor | None = None) -> Quart:
         manager.register(handle)
         handle.task = asyncio.create_task(executor.start_run(run_request, handle, manager))
 
-        async def event_stream() -> AsyncIterator[bytes]:
-            try:
-                async for chunk in handle.stream():
-                    yield chunk
-            except asyncio.CancelledError:
-                await manager.cancel(handle.id)
-                raise
+        if run_request.stream:
+            chunks: list[str] = []
+            async for chunk in handle.stream():
+                chunks.append(chunk.decode("utf-8"))
+            body = "".join(chunks)
+            response = Response(body, status=200, content_type="application/x-ndjson")
+            response.headers["Cache-Control"] = "no-store"
+            return response
 
-        response = Response(event_stream(), status=200, content_type="application/x-ndjson")
-        response.timeout = None
-        response.headers["Cache-Control"] = "no-store"
-        return response
+        events: list[dict[str, Any]] = []
+        async for chunk in handle.stream():
+            events.append(json.loads(chunk.decode("utf-8")))
+        return jsonify({"run_id": handle.id, "events": events})
 
     @app.post(f"{API_PREFIX}/runs/<run_id>/cancel")
     async def cancel_run(run_id: str):
