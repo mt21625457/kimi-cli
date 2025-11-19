@@ -110,8 +110,9 @@ class RunExecutor:
             return
 
         await handle.publish(
-            "run_started",
+            "thread.started",
             {
+                "thread_id": handle.id,
                 "work_dir": str(request.work_dir),
                 "agent_file": str(artifacts.agent_file),
                 "session_id": artifacts.session.id,
@@ -119,41 +120,48 @@ class RunExecutor:
                 "env_overrides": artifacts.env_overrides,
             },
         )
+        await handle.publish("turn.started", {})
+
+        transformer = _WireEventAggregator(handle)
+
+        status_payload: dict[str, Any] = {"status": "finished"}
 
         try:
             await run_soul(
                 artifacts.soul,
                 request.command,
-                lambda wire: self._ui_loop(wire, handle),
+                lambda wire: self._ui_loop(wire, handle, transformer),
                 handle.cancel_event,
             )
         except LLMNotSet:
             await self._publish_error(handle, "LLM is not configured")
-            await handle.publish("run_completed", {"status": "error"})
+            status_payload = {"status": "error"}
         except LLMNotSupported as exc:
             await self._publish_error(handle, str(exc))
-            await handle.publish("run_completed", {"status": "error"})
+            status_payload = {"status": "error"}
         except ChatProviderError as exc:
             await self._publish_error(handle, f"LLM provider error: {exc}")
-            await handle.publish("run_completed", {"status": "error"})
+            status_payload = {"status": "error"}
         except MaxStepsReached as exc:
-            await handle.publish(
-                "run_completed",
-                {"status": "max_steps_reached", "steps": exc.n_steps},
-            )
+            status_payload = {"status": "max_steps_reached", "steps": exc.n_steps}
         except RunCancelled:
-            await handle.publish("run_completed", {"status": "cancelled"})
+            status_payload = {"status": "cancelled"}
         except Exception as exc:  # pragma: no cover - logged for observability
             logger.exception("Run execution failed:")
             await self._publish_error(handle, f"run failed: {exc}")
-            await handle.publish("run_completed", {"status": "error"})
-        else:
-            await handle.publish("run_completed", {"status": "finished"})
+            status_payload = {"status": "error"}
         finally:
+            await transformer.flush()
+            await handle.publish("turn.completed", status_payload)
             await handle.close()
             manager.remove(handle.id)
 
-    async def _ui_loop(self, wire: WireUISide, handle: RunHandle) -> None:
+    async def _ui_loop(
+        self,
+        wire: WireUISide,
+        handle: RunHandle,
+        transformer: _WireEventAggregator,
+    ) -> None:
         while True:
             try:
                 message = await wire.receive()
@@ -170,7 +178,9 @@ class RunExecutor:
                     {"id": message.id, "decision": ApprovalResponse.APPROVE.value},
                 )
             else:
-                await handle.publish("wire_event", serialize_event(message))
+                await transformer.handle(serialize_event(message))
+
+        await transformer.flush()
 
     async def _publish_error(self, handle: RunHandle, message: str) -> None:
         await handle.publish("error", {"message": message})
@@ -178,3 +188,30 @@ class RunExecutor:
 
 def new_handle() -> RunHandle:
     return RunHandle(id=str(uuid.uuid4()))
+
+
+class _WireEventAggregator:
+    def __init__(self, handle: RunHandle):
+        self._handle = handle
+        self._buffer: list[str] = []
+
+    async def handle(self, event: dict[str, Any]) -> None:
+        if event.get("type") == "content_part" and event.get("payload", {}).get("type") == "text":
+            text = event["payload"].get("text", "")
+            if text:
+                self._buffer.append(text)
+            return
+
+        await self.flush()
+        await self._handle.publish("wire_event", event)
+
+    async def flush(self) -> None:
+        if not self._buffer:
+            return
+        text = "".join(self._buffer).strip()
+        if text:
+            await self._handle.publish(
+                "wire_event",
+                {"type": "content_part", "payload": {"type": "text", "text": text}},
+            )
+        self._buffer.clear()

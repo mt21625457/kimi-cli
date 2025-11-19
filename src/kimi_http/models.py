@@ -24,6 +24,7 @@ class RunRequest(BaseModel):
     env: dict[str, str | Any] = Field(default_factory=dict)
     options: RunOptions = Field(default_factory=RunOptions)
     stream: bool = Field(default=True)
+    include_events: bool = Field(default=False)
 
     @field_validator("command")
     @classmethod

@@ -43,12 +43,20 @@ GET /api/v1/health HTTP/2
 | `config_file` | string  | ❌   | 自定义配置文件路径，默认 `~/.kimi/config.json`。 |
 | `env`       | object    | ❌   | 覆盖 provider/model 的环境变量。常见键：`KIMI_BASE_URL`、`KIMI_API_KEY`、`KIMI_MODEL_NAME`、`KIMI_MODEL_MAX_CONTEXT_SIZE`、`KIMI_MODEL_CAPABILITIES` 等。键名大小写不敏感，服务会统一转换为大写。 |
 | `options`   | object    | ❌   | 运行期选项。`yolo` (bool, default true) 自动批准工具请求；`thinking` (bool, default false) 请求思维链模式（需模型支持）。 |
-| `stream`    | bool      | ❌   | 是否实时流式返回事件。默认 `true`。当设为 `false` 时，服务会在 run 完成后一次性返回包含所有事件的 JSON。 |
+| `stream`    | bool      | ❌   | 默认 `true`，服务器会直接流式推送 NDJSON 事件（`thread.started`、`wire_event`、`turn.completed` 等），每个事件是一行 JSON。设置为 `false` 时，返回单个 `{run_id, conversation[], status}` JSON。 |
+| `include_events` | bool | ❌ | 仅在 `stream=true` 模式下有效。默认为 `false`（不返回原始事件）；当为 `true` 时，响应会额外包含 `events[]`，用于调试或审计。 |
 
 ### 响应格式
 
-- `stream=true`（默认）：`Content-Type: application/x-ndjson`，服务器会在 run 结束后一次性写出按顺序拼接的 NDJSON 文本，每行 JSON 对象含 `run_id`, `type`, `payload`, `ts`。
-- `stream=false`：`Content-Type: application/json`，返回 `{ "run_id": "...", "events": [ ... ] }`，`events` 数组顺序等同于流式事件。
+- `stream=true`（默认）：`Content-Type: application/x-ndjson`，响应体由多行 JSON 组成，每行对应一个事件。
+  - 事件结构：`{ "run_id": "...", "type": "thread.started", "payload": {...}, "ts": "ISO 时间" }`
+  - 常见事件：
+    - `thread.started`：线程创建；`payload.thread_id` 等同于 `run_id`
+    - `turn.started`/`turn.completed`：一次指令的生命周期，`payload.status` 为 `finished`/`error`/`cancelled`
+    - `wire_event`：由服务器从内部 wire 事件转换而来，包含聚合后的 `content_part` 文本、工具调用等
+    - `approval_request`/`approval_response`、`error` 等
+  - 服务器会在内部聚合文本，确保 `wire_event` 的 `content_part` 一次性返回完整句子，而非拆分的 token。
+- `stream=false`：`Content-Type: application/json`，返回 `{ "run_id": "...", "conversation": [...], "status": "finished" }`。若请求中设置了 `"include_events": true`，响应还会包含 `events` 数组（事件结构与流式模式一致）。
 - 典型事件类型：
   - `run_started`：包含 `work_dir`、`agent_file`、`session_id`、`model_name`、`env_overrides`。
   - `wire_event`：序列化的 wire 消息（StepBegin/StatusUpdate/ToolCall 等）。

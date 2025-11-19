@@ -46,18 +46,36 @@ def create_app(run_executor: RunExecutor | None = None) -> Quart:
         handle.task = asyncio.create_task(executor.start_run(run_request, handle, manager))
 
         if run_request.stream:
-            chunks: list[str] = []
-            async for chunk in handle.stream():
-                chunks.append(chunk.decode("utf-8"))
-            body = "".join(chunks)
-            response = Response(body, status=200, content_type="application/x-ndjson")
+            async def event_stream() -> AsyncIterator[bytes]:
+                try:
+                    async for chunk in handle.stream():
+                        yield chunk
+                except asyncio.CancelledError:
+                    await manager.cancel(handle.id)
+                    raise
+
+            response = Response(event_stream(), status=200, content_type="application/x-ndjson")
+            response.timeout = None
             response.headers["Cache-Control"] = "no-store"
             return response
 
         events: list[dict[str, Any]] = []
         async for chunk in handle.stream():
-            events.append(json.loads(chunk.decode("utf-8")))
-        return jsonify({"run_id": handle.id, "events": events})
+            text = chunk.decode("utf-8").strip()
+            if not text:
+                continue
+            events.append(json.loads(text))
+
+        conversation = _build_conversation(run_request, events)
+        response_payload: dict[str, Any] = {
+            "run_id": handle.id,
+            "conversation": conversation,
+            "status": _final_status(events),
+        }
+        if run_request.include_events:
+            response_payload["events"] = events
+        return jsonify(response_payload)
+
 
     @app.post(f"{API_PREFIX}/runs/<run_id>/cancel")
     async def cancel_run(run_id: str):
@@ -69,6 +87,33 @@ def create_app(run_executor: RunExecutor | None = None) -> Quart:
         return response.model_dump()
 
     return app
+
+
+def _build_conversation(request: RunRequest, events: list[dict[str, Any]]) -> list[dict[str, str]]:
+    conversation: list[dict[str, str]] = [
+        {"role": "user", "content": request.command},
+    ]
+    assistant_parts: list[str] = []
+    for event in events:
+        if event.get("type") != "wire_event":
+            continue
+        payload = event.get("payload", {})
+        if payload.get("type") != "content_part":
+            continue
+        content_payload = payload.get("payload", {})
+        if content_payload.get("type") == "text":
+            assistant_parts.append(content_payload.get("text", ""))
+
+    if assistant_parts:
+        conversation.append({"role": "assistant", "content": "".join(assistant_parts).strip()})
+    return conversation
+
+
+def _final_status(events: list[dict[str, Any]]) -> str:
+    for event in reversed(events):
+        if event.get("type") == "turn.completed":
+            return event.get("payload", {}).get("status", "finished")
+    return "finished"
 
 
 def _parse_args() -> argparse.Namespace:
