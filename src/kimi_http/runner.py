@@ -196,22 +196,29 @@ class _WireEventAggregator:
         self._buffer: list[str] = []
 
     async def handle(self, event: dict[str, Any]) -> None:
-        if event.get("type") == "content_part" and event.get("payload", {}).get("type") == "text":
+        if _is_text_payload(event):
             text = event["payload"].get("text", "")
             if text:
                 self._buffer.append(text)
             return
 
         await self.flush()
-        await self._handle.publish("wire_event", event)
+        await self._handle.publish(event.get("type", "wire_event"), event.get("payload"))
 
     async def flush(self) -> None:
         if not self._buffer:
             return
         text = "".join(self._buffer).strip()
-        if text:
-            await self._handle.publish(
-                "wire_event",
-                {"type": "content_part", "payload": {"type": "text", "text": text}},
-            )
         self._buffer.clear()
+        if not text:
+            return
+        item = {"id": str(uuid.uuid4()), "type": "agent_message", "text": text}
+        await self._handle.publish("item.started", {"item": item})
+        await self._handle.publish("item.completed", {"item": item})
+
+
+def _is_text_payload(event: dict[str, Any]) -> bool:
+    if event.get("type") != "content_part":
+        return False
+    payload = event.get("payload", {})
+    return payload.get("type") == "text"

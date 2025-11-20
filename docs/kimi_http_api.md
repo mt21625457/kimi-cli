@@ -43,26 +43,18 @@ GET /api/v1/health HTTP/2
 | `config_file` | string  | ❌   | 自定义配置文件路径，默认 `~/.kimi/config.json`。 |
 | `env`       | object    | ❌   | 覆盖 provider/model 的环境变量。常见键：`KIMI_BASE_URL`、`KIMI_API_KEY`、`KIMI_MODEL_NAME`、`KIMI_MODEL_MAX_CONTEXT_SIZE`、`KIMI_MODEL_CAPABILITIES` 等。键名大小写不敏感，服务会统一转换为大写。 |
 | `options`   | object    | ❌   | 运行期选项。`yolo` (bool, default true) 自动批准工具请求；`thinking` (bool, default false) 请求思维链模式（需模型支持）。 |
-| `stream`    | bool      | ❌   | 默认 `true`，服务器会直接流式推送 NDJSON 事件（`thread.started`、`wire_event`、`turn.completed` 等），每个事件是一行 JSON。设置为 `false` 时，返回单个 `{run_id, conversation[], status}` JSON。 |
+| `stream`    | bool      | ❌   | 默认 `true`，服务器会直接流式推送 NDJSON 事件（`thread.started`、`turn.started`、`item.completed`、`turn.completed` 等），每个事件是一行 JSON。设置为 `false` 时，返回单个 `{run_id, conversation[], status}` JSON。 |
 | `include_events` | bool | ❌ | 仅在 `stream=true` 模式下有效。默认为 `false`（不返回原始事件）；当为 `true` 时，响应会额外包含 `events[]`，用于调试或审计。 |
 
 ### 响应格式
 
-- `stream=true`（默认）：`Content-Type: application/x-ndjson`，响应体由多行 JSON 组成，每行对应一个事件。
-  - 事件结构：`{ "run_id": "...", "type": "thread.started", "payload": {...}, "ts": "ISO 时间" }`
-  - 常见事件：
-    - `thread.started`：线程创建；`payload.thread_id` 等同于 `run_id`
-    - `turn.started`/`turn.completed`：一次指令的生命周期，`payload.status` 为 `finished`/`error`/`cancelled`
-    - `wire_event`：由服务器从内部 wire 事件转换而来，包含聚合后的 `content_part` 文本、工具调用等
-    - `approval_request`/`approval_response`、`error` 等
-  - 服务器会在内部聚合文本，确保 `wire_event` 的 `content_part` 一次性返回完整句子，而非拆分的 token。
-- `stream=false`：`Content-Type: application/json`，返回 `{ "run_id": "...", "conversation": [...], "status": "finished" }`。若请求中设置了 `"include_events": true`，响应还会包含 `events` 数组（事件结构与流式模式一致）。
-- 典型事件类型：
-  - `run_started`：包含 `work_dir`、`agent_file`、`session_id`、`model_name`、`env_overrides`。
-  - `wire_event`：序列化的 wire 消息（StepBegin/StatusUpdate/ToolCall 等）。
-  - `approval_request` & `approval_response`：自动审批时的通知。
-  - `error`：非致命错误（如 LLM 未配置）。
-  - `run_completed`：`status` 可为 `finished` / `error` / `cancelled` / `max_steps_reached`。
+- `stream=true`（默认）：`Content-Type: application/x-ndjson`，响应体由多行 JSON 组成，每行对应一个事件，结构为 `{ "run_id": "...", "type": "thread.started", "payload": {...}, "ts": "ISO 时间" }`。常见事件：
+  - `thread.started`：线程创建；`payload.thread_id` 即 `run_id`
+  - `turn.started` / `turn.completed`：一次提问的生命周期，`payload.status` 表示 `finished` / `error` / `cancelled` 等状态
+  - `item.started` / `item.completed`：线程项（当前实现聚合出 `item.type = "agent_message"` 的整句文本，后续会扩展命令执行、文件修改、MCP 调用等类型）
+  - `approval_request` / `approval_response`、`error` 等
+  - 服务器会在内部聚合文本，确保 `item` 事件一次输出完整句子，而非按 token 切分
+- `stream=false`：`Content-Type: application/json`，返回 `{ "run_id": "...", "conversation": [...], "status": "finished" }`；若设置 `"include_events": true`，则额外附带 `events` 数组，其内容与流式事件一致。
 
 ### 请求示例
 
@@ -80,17 +72,18 @@ curl --http2 -N \
 ### 响应片段示例
 
 ```
-{"run_id":"7c6...","type":"run_started","payload":{"work_dir":"/Users/alice/project","agent_file":"/Users/.../agent.yaml","session_id":"sess_...","model_name":"kimi-for-coding","env_overrides":{"KIMI_BASE_URL":"https://api.moonshot.cn/v1","KIMI_API_KEY":"******"}},"ts":"2025-11-19T07:15:23.512Z"}
-{"run_id":"7c6...","type":"wire_event","payload":{"type":"step_begin","payload":{"n":1}},"ts":"2025-11-19T07:15:24.104Z"}
-{"run_id":"7c6...","type":"wire_event","payload":{"type":"content_part","payload":{"role":"assistant","content":[{"type":"text","text":"..."}]}},"ts":"2025-11-19T07:15:27.512Z"}
-{"run_id":"7c6...","type":"run_completed","payload":{"status":"finished"},"ts":"2025-11-19T07:16:03.289Z"}
+{"run_id":"7c6...","type":"thread.started","payload":{"thread_id":"7c6...","work_dir":"/Users/alice/project","agent_file":"/Users/.../agent.yaml"},"ts":"2025-11-19T07:15:23.512Z"}
+{"run_id":"7c6...","type":"turn.started","payload":{},"ts":"2025-11-19T07:15:23.700Z"}
+{"run_id":"7c6...","type":"item.started","payload":{"item":{"id":"item_1","type":"agent_message","text":"Diagnosing..."}},"ts":"2025-11-19T07:15:27.100Z"}
+{"run_id":"7c6...","type":"item.completed","payload":{"item":{"id":"item_1","type":"agent_message","text":"Diagnosing repo state…"}},"ts":"2025-11-19T07:15:28.300Z"}
+{"run_id":"7c6...","type":"turn.completed","payload":{"status":"finished"},"ts":"2025-11-19T07:16:03.289Z"}
 ```
 
 若发生错误，例如 LLM 未配置，流中会出现：
 
 ```
 {"run_id":"7c6...","type":"error","payload":{"message":"LLM is not configured"},"ts":"..."}
-{"run_id":"7c6...","type":"run_completed","payload":{"status":"error"},"ts":"..."}
+{"run_id":"7c6...","type":"turn.completed","payload":{"status":"error"},"ts":"..."}
 ```
 
 ## POST /api/v1/runs/{run_id}/cancel

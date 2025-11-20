@@ -201,7 +201,7 @@ python -m kimi_http.server --host 0.0.0.0 --port 9000
   ```
   响应为 `application/x-ndjson`，每行都是一个事件（wire 事件、审批、完成状态等）。
 - `POST /api/v1/runs/<id>/cancel`：取消指定 run，并在流中返回 `cancelled` 状态。
-- `/runs` 默认流式返回 NDJSON 事件（`thread.started`、`wire_event`、`turn.completed` 等），每个事件都是单行 JSON；内容项在服务器端聚合成完整句子后才推送。若想在一次响应中得到 `{run_id, conversation[], status}` 聚合结果，可传 `"stream": false`；若想在聚合结果里附带事件数组，可再加 `"include_events": true`。
+- `/runs` 默认流式返回 NDJSON 事件（`thread.started`、`turn.started`、`item.completed`、`turn.completed` 等），每个事件都是单行 JSON，文本类项会在服务器端聚合成完整句子后再推送。若想在一次响应中得到 `{run_id, conversation[], status}` 聚合结果，可传 `"stream": false`；若想在聚合结果里附带事件数组，可再加 `"include_events": true`。
 
 服务会为每个请求独立创建 `Session`、`Runtime`、`KimiSoul`，互不共享历史；审批默认自动通过。若需要 HTTP/2，可使用 `curl --http2` 或任意支持 HTTP/2 的客户端。
 

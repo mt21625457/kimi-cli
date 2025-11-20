@@ -95,14 +95,13 @@ def _build_conversation(request: RunRequest, events: list[dict[str, Any]]) -> li
     ]
     assistant_parts: list[str] = []
     for event in events:
-        if event.get("type") != "wire_event":
+        if event.get("type") != "item.completed":
             continue
         payload = event.get("payload", {})
-        if payload.get("type") != "content_part":
+        item = payload.get("item")
+        if not item or item.get("type") != "agent_message":
             continue
-        content_payload = payload.get("payload", {})
-        if content_payload.get("type") == "text":
-            assistant_parts.append(content_payload.get("text", ""))
+        assistant_parts.append(item.get("text", ""))
 
     if assistant_parts:
         conversation.append({"role": "assistant", "content": "".join(assistant_parts).strip()})

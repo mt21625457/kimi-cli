@@ -56,6 +56,7 @@ async def test_run_endpoint_returns_json_payload(tmp_path):
     assert payload["conversation"][0]["role"] == "user"
     if len(payload["conversation"]) > 1:
         assert payload["conversation"][1]["role"] == "assistant"
+        assert payload["conversation"][1]["content"] == "hi"
 
 
 @pytest.mark.asyncio

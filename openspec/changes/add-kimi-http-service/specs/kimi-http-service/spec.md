@@ -22,7 +22,7 @@ HTTP 服务 MUST 暴露 `POST /api/v1/runs` 接口，接收 JSON（包含 `work_
 - **Given** 客户端向 `/api/v1/runs` 发送 `{ "work_dir": "/tmp/app", "command": "list files" }`
 - **When** 服务器处理该请求
 - **Then** 服务 MUST 创建一个新的 `Session` 与 `Runtime`（包含 `KimiSoul`）仅服务该请求
-- **AND** 服务 MUST 将 `wire.message` 中的 `StepBegin`、`StatusUpdate`、`Compaction*`、`Approval*` 等事件按发生顺序序列化为 JSON 行/块写入响应体
+- **AND** 服务 MUST 将线程事件按发生顺序序列化为 JSON 行输出，包括 `thread.started`、`turn.started`、`item.*`、`turn.completed`、审批等结构化事件
 - **AND** 响应最终 MUST 以一个终止事件或状态块告知成功、失败或超时。
 
 #### Scenario: 环境变量与模型覆盖
